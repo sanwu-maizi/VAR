@@ -36,7 +36,7 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
 
         # 创建 npz 文件并清理文件夹
         create_npz_from_sample_folder(save_folder, num_images)
-        # shutil.rmtree(save_folder)
+        shutil.rmtree(save_folder)
 
         # 计算 OpenAI 指标
         inception_score, fid, sfid, prec, recall = compute_metrics(
@@ -44,14 +44,14 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
             f"{save_folder}.npz"
         )
 
-        # 写入 OpenAI 指标
-        # f.write("openai:\n")
         f.write(f"Inception Score: {inception_score}, FID: {fid}, sFID: {sfid}, Precision: {prec}, Recall: {recall}\n\n")
+        
+        os.remove(f"{save_folder}.npz")
 
     print(f"Results have been saved to {output_txt_path}")
     
 if __name__ == "__main__":
-    save_folder="/root/autodl-tmp/outputs/256-ariter128-diffsteps250-cfg1.5-image50000"
+    save_folder="/root/autodl-tmp/outputs/256-depth30-ariter32-diffsteps250-cfg1.5-image50000"
     num_images=50000
 
     # 定义输出文件路径

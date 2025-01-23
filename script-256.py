@@ -16,14 +16,15 @@ def main():
     parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=128)
     parser.add_argument('--cfg', type=float, required=False, help="Classifier-free guidance scale",default=1.5)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
+    parser.add_argument('--model_depth', type=int, required=False,default=30)
     args = parser.parse_args()
 
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
     setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
     from models import VQVAE, build_vae_var
 
-    MODEL_DEPTH = 30    # TODO: =====> please specify MODEL_DEPTH <=====
-    assert MODEL_DEPTH in {16, 20, 24, 30}
+    MODEL_DEPTH = args.model_depth    # TODO: =====> please specify MODEL_DEPTH <=====
+    # assert MODEL_DEPTH in {16, 20, 24, 30}
 
     # download checkpoint
     hf_home = 'https://huggingface.co/FoundationVision/var/resolve/main'

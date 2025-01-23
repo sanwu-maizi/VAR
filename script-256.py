@@ -7,14 +7,15 @@ import numpy as np
 import time
 import argparse
 from PIL import Image
+from test import write_save_folder_to_file
 
 def main():
     # Command-line argument parsing
     parser = argparse.ArgumentParser(description="Sample images with VAE-VAR model")
-    parser.add_argument('--num_images', type=int, required=True, help="Number of images to generate",default=50000)
-    parser.add_argument('--num_iter', type=int, required=True, help="Batch size per iteration",default=128)
-    parser.add_argument('--cfg', type=float, required=True, help="Classifier-free guidance scale",default=1.5)
-    parser.add_argument('--output_dir', type=str, required=True, help="Output directory to save images",default="/root/autodl-tmp/outputs")
+    parser.add_argument('--num_images', type=int, required=False, help="Number of images to generate",default=50000)
+    parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=128)
+    parser.add_argument('--cfg', type=float, required=False, help="Classifier-free guidance scale",default=1.5)
+    parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
     args = parser.parse_args()
 
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
@@ -61,7 +62,7 @@ def main():
     class_labels = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 980, 980, 437, 437, 22, 22, 562, 562)
     more_smooth = False
 
-    save_folder = os.path.join(output_dir, "256-ariter{}-diffsteps{}-cfg{}-image{}".format(num_iter, num_sampling_steps, cfg, num_images))
+    save_folder = os.path.join(output_dir, "256-depth{}-ariter{}-diffsteps{}-cfg{}-image{}".format(MODEL_DEPTH, num_iter, num_sampling_steps, cfg, num_images))
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     num_steps = num_images // batch_size + 1
@@ -129,13 +130,15 @@ def main():
             img_id = i * batch_size + b_id
             file_name = f"{str(img_id).zfill(5)}.png"
             img.save(os.path.join(save_folder, file_name))
+            
+    output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")
 
-    from npzmaker import create_npz_from_sample_folder
+    # 确保 output 文件夹存在
+    os.makedirs("/root/autodl-tmp/outputs", exist_ok=True)
 
-    # Create npz file and clean up
-    create_npz_from_sample_folder(save_folder, num_images)
-    os.system(f"rm -r {save_folder}")
-    os.system(f"python evaluator.py /root/autodl-tmp/pretrained_models/VIRTUAL_imagenet256_labeled.npz f{save_folder}.npz")
-
+    sec_per_image=used_time / gen_img_cnt
+    write_save_folder_to_file(output_txt_path,save_folder,num_images,sec_per_image)
+    
+    
 if __name__ == "__main__":
     main()

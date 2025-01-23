@@ -1,7 +1,7 @@
 from tqdm import tqdm
 import numpy as np
 from PIL import Image
-def create_npz_from_sample_folder(sample_dir, num=50_000):
+def create_npz_from_sample_folder(sample_dir, num=50000):
     """
     Builds a single .npz file from a folder of .png samples.
     """
@@ -17,6 +17,7 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
     print(f"Saved .npz file to {sample_dir} [shape={samples.shape}].")
     return npz_path
 
-sample_folder_dir = "/root/autodl-tmp/outputs/256-ariter128-diffsteps250-cfg1.5-image500001"
-img_num = 50000 # 修改总数目
-create_npz_from_sample_folder(sample_folder_dir, img_num)
+if __name__ == "__main__":
+    sample_folder_dir = "/root/autodl-tmp/outputs/256-ariter128-diffsteps250-cfg1.5-image500001"
+    img_num = 50000 # 修改总数目
+    create_npz_from_sample_folder(sample_folder_dir, img_num)

@@ -23,8 +23,68 @@ INCEPTION_V3_PATH = "classify_image_graph_def.pb"
 FID_POOL_NAME = "pool_3:0"
 FID_SPATIAL_NAME = "mixed_6/conv:0"
 
+def compute_metrics(ref_batch_path: str, sample_batch_path: str) -> Tuple[float, float, float, float, float]:
+    """
+    计算并返回以下五个指标：
+    - Inception Score
+    - FID
+    - sFID
+    - Precision
+    - Recall
+
+    :param ref_batch_path: 参考批次的npz文件路径
+    :param sample_batch_path: 样本批次的npz文件路径
+    :return: 包含五个指标的元组 (Inception Score, FID, sFID, Precision, Recall)
+    """
+    config = tf.ConfigProto(
+        allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
+    )
+    config.gpu_options.allow_growth = True
+    evaluator = Evaluator(tf.Session(config=config))
+
+    print("warming up TensorFlow...")
+    evaluator.warmup()
+
+    print("computing reference batch activations...")
+    ref_acts = evaluator.read_activations(ref_batch_path)
+    print("computing/reading reference batch statistics...")
+    ref_stats, ref_stats_spatial = evaluator.read_statistics(ref_batch_path, ref_acts)
+
+    print("computing sample batch activations...")
+    sample_acts = evaluator.read_activations(sample_batch_path)
+    print("computing/reading sample batch statistics...")
+    sample_stats, sample_stats_spatial = evaluator.read_statistics(sample_batch_path, sample_acts)
+
+    print("Computing evaluations...")
+    inception_score = evaluator.compute_inception_score(sample_acts[0])
+    fid = sample_stats.frechet_distance(ref_stats)
+    sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
+    prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
+
+    return inception_score, fid, sfid, prec, recall
+
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("ref_batch", help="path to reference batch npz file")
+    parser.add_argument("sample_batch", help="path to sample batch npz file")
+    args = parser.parse_args()
+
+    # 调用 compute_metrics 函数并获取结果
+    inception_score, fid, sfid, prec, recall = compute_metrics(args.ref_batch, args.sample_batch)
+
+    # 打印结果
+    print("Inception Score:", inception_score)
+    print("FID:", fid)
+    print("sFID:", sfid)
+    print("Precision:", prec)
+    print("Recall:", recall)
+
+
+if __name__ == "__main__":
+    main()
+
+def main1():
     parser = argparse.ArgumentParser()
     parser.add_argument("ref_batch", help="path to reference batch npz file")
     parser.add_argument("sample_batch", help="path to sample batch npz file")
@@ -647,7 +707,3 @@ def _numpy_partition(arr, kth, **kwargs):
 
     with ThreadPool(num_workers) as pool:
         return list(pool.map(partial(np.partition, kth=kth, **kwargs), batches))
-
-
-if __name__ == "__main__":
-    main()

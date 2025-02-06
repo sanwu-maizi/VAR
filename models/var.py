@@ -11,6 +11,14 @@ from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
 from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
 from models.vqvae import VQVAE, VectorQuantizer2
 
+import os
+import torch
+from torchvision.transforms.functional import to_pil_image
+from PIL import Image
+
+import matplotlib.pyplot as plt
+
+
 
 class SharedAdaLin(nn.Linear):
     def forward(self, cond_BD):
@@ -19,6 +27,128 @@ class SharedAdaLin(nn.Linear):
 
 
 class VAR(nn.Module):
+    def visualize_change_magnitude(self, current_h_BChw, prev_h_BChw, save_folder, si):
+        """
+        可视化当前图像与上一阶段图像的变化幅度。
+
+        参数:
+            current_h_BChw (torch.Tensor): 当前阶段的图像，形状为 (B, Cvae, pn, pn)。
+            prev_h_BChw (torch.Tensor): 上一阶段的图像，形状为 (B, Cvae, pn, pn)。
+            save_folder (str): 保存图像的文件夹路径。
+            si (int): 当前阶段的索引。
+        """
+        if prev_h_BChw is None:
+            return  # 如果是第一阶段，没有上一阶段的图像，直接返回
+
+        # 差值与原值的比值
+        diff_ratio = torch.abs(current_h_BChw - prev_h_BChw) / (torch.abs(prev_h_BChw) + 1e-8)
+
+        # 获取 patch 的大小
+        B, Cvae, pn, _ = current_h_BChw.shape
+
+        # 初始化余弦相似度矩阵
+        cosine_sim_map = torch.zeros(B, pn, pn, device=current_h_BChw.device)
+        
+        # 计算每个 patch 的余弦相似度
+        for i in range(pn):
+            for j in range(pn):
+                # 提取当前 patch
+                current_patch = current_h_BChw[:, :, i, j]  # (B, Cvae)
+                prev_patch = prev_h_BChw[:, :, i, j]  # (B, Cvae)
+
+                # 计算余弦相似度
+                cosine_sim = nn.functional.cosine_similarity(
+                    current_patch,  # (B, Cvae)
+                    prev_patch,  # (B, Cvae)
+                    dim=1  # 在 Cvae 维度上计算
+                )  # (B,)
+
+                # 将余弦相似度赋值到对应位置
+                cosine_sim_map[:, i, j] = cosine_sim
+        # 计算余弦相似度的最小值和最大值
+        cosine_sim_min = cosine_sim_map.min().item()
+        cosine_sim_max = cosine_sim_map.max().item()
+
+        # 遍历批次中的每张图片
+        for b_id in range(current_h_BChw.size(0)):
+            # 创建保存路径
+            img_folder = os.path.join(save_folder, f"img_{b_id:05d}")
+            os.makedirs(img_folder, exist_ok=True)
+
+            # 可视化差值
+            plt.figure(figsize=(10, 5))
+            plt.imshow(diff_ratio[b_id].mean(dim=0).cpu().numpy(), cmap='hot', vmin=0, vmax=1)
+            plt.colorbar(label='Diff Ratio')
+            plt.title(f"Stage {si} - Diff Ratio (Image {b_id})")
+            plt.savefig(os.path.join(img_folder, f"stage_{si:02d}_diff_ratio.png"))
+            plt.close()
+
+            # 可视化余弦相似度
+            plt.figure(figsize=(10, 5))
+            plt.imshow(cosine_sim_map[b_id].cpu().numpy(), cmap='coolwarm', vmin=cosine_sim_min, vmax=cosine_sim_max)
+            plt.colorbar(label='Cosine Similarity')
+            plt.title(f"Stage {si} - Cosine Similarity (Image {b_id})")
+            plt.savefig(os.path.join(img_folder, f"stage_{si:02d}_cosine_sim.png"))
+            plt.close()
+
+    def convert_feature_to_rgb(h_hat):
+        """
+        将特征图转换为 RGB 图像。
+
+        参数:
+            h_hat (torch.Tensor): 特征图，形状为 (B, C, H, W)。
+
+        返回:
+            list: RGB 图像列表，每个元素是一个 PIL 图像。
+        """
+        # Normalize the tensor to [0, 1] range
+        transformed_tensor = h_hat.clamp(0, 1)  # Ensure values are in [0, 1]
+        transformed_tensor = (transformed_tensor * 255).round().byte()  # Scale to [0, 255] and round
+
+        # Pre-process all images into arrays
+        image_arrays = [transformed_tensor[b_id].permute(1, 2, 0).cpu().numpy() for b_id in range(transformed_tensor.size(0))]
+
+        # Convert arrays to images
+        images = [Image.fromarray(img_array) for img_array in image_arrays]
+
+        return images
+
+    def save_images(images, save_folder, batch_idx, batch_size):
+        """
+        将 RGB 图像保存到目标文件夹。
+
+        参数:
+            images (list): RGB 图像列表，每个元素是一个 PIL 图像。
+            save_folder (str): 保存图像的文件夹路径。
+            batch_idx (int): 当前批次的索引。
+            batch_size (int): 批量大小。
+        """
+        for b_id in range(batch_size):  # 遍历批次中的每张图片
+            img_id = b_id  # 计算全局图片 ID
+            img_folder = os.path.join(save_folder, f"img_{img_id:05d}")  # 每张图片的文件夹
+            os.makedirs(img_folder, exist_ok=True)  # 创建文件夹
+
+            # 保存当前阶段的图像
+            stage_image = images[b_id]  # 取当前图片的特征图，保持 4D 形状
+            save_path = os.path.join(img_folder, f"stage_{batch_idx:02d}.png")  # 保存路径
+            stage_image.save(save_path)
+
+    def process_and_save_features(h_hat, save_folder, batch_idx, batch_size):
+        """
+        处理特征图并保存为 RGB 图像。
+
+        参数:
+            h_hat (torch.Tensor): 特征图，形状为 (B, C, H, W)。
+            save_folder (str): 保存图像的文件夹路径。
+            batch_idx (int): 当前批次的索引。
+            batch_size (int): 批量大小。
+        """
+        # 将特征图转换为 RGB 图像
+        images = convert_feature_to_rgb(h_hat)
+
+        # 保存图像
+        save_images(images, save_folder, batch_idx, batch_size)
+    
     def __init__(
         self, vae_local: VQVAE,
         num_classes=1000, depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
@@ -40,6 +170,7 @@ class VAR(nn.Module):
         self.L = sum(pn ** 2 for pn in self.patch_nums)
         self.first_l = self.patch_nums[0] ** 2
         self.begin_ends = []
+        self.prev_h_BChw = None  # 用于缓存上一阶段的图像
         cur = 0
         for i, pn in enumerate(self.patch_nums):
             self.begin_ends.append((cur, cur+pn ** 2))
@@ -155,6 +286,7 @@ class VAR(nn.Module):
         
         cur_L = 0
         f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+        prev_f_hat = None  # 用于缓存上一阶段的累积图像特征
         
         for b in self.blocks: b.attn.kv_caching(True)
         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
@@ -180,7 +312,19 @@ class VAR(nn.Module):
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+
             f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
+            
+            # 保存当前阶段的 h_BChw 图像# 可视化变化幅度
+            save_folder = "/root/autodl-tmp/outputs/img"
+            self.visualize_change_magnitude(f_hat, prev_f_hat, save_folder, si)
+
+            # 缓存当前阶段的累积图像特征
+            prev_f_hat = f_hat.clone()
+            
+            # process_and_save_features(self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5), save_folder, si, B)  # 保存单张图片
+            
+            
             if si != self.num_stages_minus_1:   # prepare for next stage
                 next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
                 next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]

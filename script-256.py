@@ -12,7 +12,7 @@ from test import write_save_folder_to_file
 def main():
     # Command-line argument parsing
     parser = argparse.ArgumentParser(description="Sample images with VAE-VAR model")
-    parser.add_argument('--num_images', type=int, required=False, help="Number of images to generate",default=50000)
+    parser.add_argument('--num_images', type=int, required=False, help="Number of images to generate",default=5000)
     parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=128)
     parser.add_argument('--cfg', type=float, required=False, help="Classifier-free guidance scale",default=1.5)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
@@ -131,12 +131,14 @@ def main():
             img_id = i * batch_size + b_id
             file_name = f"{str(img_id).zfill(5)}.png"
             img.save(os.path.join(save_folder, file_name))
+        
+        # break
             
     output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")
 
     # 确保 output 文件夹存在
     os.makedirs("/root/autodl-tmp/outputs", exist_ok=True)
-
+    
     sec_per_image=used_time / gen_img_cnt
     write_save_folder_to_file(output_txt_path,save_folder,num_images,sec_per_image)
     

@@ -127,7 +127,7 @@ class VAR(nn.Module):
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
-        more_smooth=False,
+        more_smooth=False, is_return_raw=False, f_hat_past=None, next_token_map_past=None,cur_L_past=None,cached_k_past=None, cached_v_past=None
     ) -> torch.Tensor:   # returns reconstructed image (B, 3, H, W) in [0, 1]
         """
         only used for inference, on autoregressive mode
@@ -143,6 +143,7 @@ class VAR(nn.Module):
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
         
+        
         if label_B is None:
             label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
         elif isinstance(label_B, int):
@@ -151,13 +152,39 @@ class VAR(nn.Module):
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
         lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
-        next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
         
-        cur_L = 0
-        f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+        if f_hat_past is None:
+            cur_L = 0
+            f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])  # initialize f_hat if None
+        else:
+            cur_L = cur_L_past
+            f_hat = f_hat_past  # use the passed f_hat_past
+
+        if next_token_map_past is None:
+            next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]  # initialize next_token_map if None
+        else:
+            next_token_map = next_token_map_past  # use the passed next_token_map_past
+            
+        if is_return_raw:
+            segments_start = 0
+            segments_end = len(self.patch_nums) // 2
+        else:
+            segments_start = len(self.patch_nums) // 2
+            segments_end = len(self.patch_nums)+1
         
-        for b in self.blocks: b.attn.kv_caching(True)
-        for si, pn in enumerate(self.patch_nums):   # si: i-th segment
+        # 初始化缓存字典
+        block_k_cache = {}
+        block_v_cache = {}
+        
+        for b in self.blocks: 
+            b.attn.kv_caching(True)
+            if cached_k_past is not None and cached_v_past is not None:
+                # 如果传递了缓存，使用传递过来的cached_k和cached_v
+                b.attn.cached_k = cached_k_past.get(i, None)
+                b.attn.cached_v = cached_v_past.get(i, None)
+        
+        for si, pn in enumerate(self.patch_nums[segments_start:segments_end]):   # si: i-th segment
+            si=si+segments_start
             ratio = si / self.num_stages_minus_1
             # last_L = cur_L
             cur_L += pn*pn
@@ -186,7 +213,14 @@ class VAR(nn.Module):
                 next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
                 next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         
-        for b in self.blocks: b.attn.kv_caching(False)
+        for i, b in enumerate(self.blocks):
+            block_k_cache[i] = b.attn.cached_k
+            block_v_cache[i] = b.attn.cached_v
+            b.attn.kv_caching(False)
+           
+        if is_return_raw:
+            return f_hat, next_token_map, cur_L
+        
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
@@ -195,7 +229,7 @@ class VAR(nn.Module):
         :param x_BLCv_wo_first_l: teacher forcing input (B, self.L-self.first_l, self.Cvae)
         :return: logits BLV, V is vocab_size
         """
-        bg, ed = self.begin_ends[self.prog_si] if self.prog_si >= 0 else (0, self.L)  #每个阶段的起始(bg)和结束位置(ed)，[1+4+..+25,1+4+..+36]
+        bg, ed = self.begin_ends[self.prog_si] if self.prog_si >= 0 else (0, self.L)
         B = x_BLCv_wo_first_l.shape[0]
         with torch.cuda.amp.autocast(enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)

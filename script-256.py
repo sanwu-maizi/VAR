@@ -16,7 +16,10 @@ def main():
     parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=128)
     parser.add_argument('--cfg', type=float, required=False, help="Classifier-free guidance scale",default=1.5)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
+<<<<<<< Updated upstream
     parser.add_argument('--model_depth', type=int, required=False,default=30)
+=======
+>>>>>>> Stashed changes
     args = parser.parse_args()
 
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
@@ -25,6 +28,8 @@ def main():
 
     MODEL_DEPTH = args.model_depth    # TODO: =====> please specify MODEL_DEPTH <=====
     # assert MODEL_DEPTH in {16, 20, 24, 30}
+    MODEL_DEPTH = 30    # TODO: =====> please specify MODEL_DEPTH <=====
+    assert MODEL_DEPTH in {16, 20, 24, 30}
 
     # download checkpoint
     hf_home = 'https://huggingface.co/FoundationVision/var/resolve/main'
@@ -61,9 +66,14 @@ def main():
     torch.manual_seed(seed)
     num_sampling_steps = 250
     class_labels = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 980, 980, 437, 437, 22, 22, 562, 562)
+    class_labels = (277,277,277,277,277,277,277,277, 980, 980, 437, 437, 22, 22, 562, 562)
     more_smooth = False
 
+<<<<<<< Updated upstream
     save_folder = os.path.join(output_dir, "256-depth{}-ariter{}-diffsteps{}-cfg{}-image{}".format(MODEL_DEPTH, num_iter, num_sampling_steps, cfg, num_images))
+=======
+    save_folder = os.path.join(output_dir, "1256-ariter{}-diffsteps{}-cfg{}-image{}".format(num_iter, num_sampling_steps, cfg, num_images))
+>>>>>>> Stashed changes
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     num_steps = num_images // batch_size + 1
@@ -89,6 +99,31 @@ def main():
     event_end = torch.cuda.Event(enable_timing=True)
     used_time = 0.0
     gen_img_cnt = 0
+    
+    print(var)
+    
+    # sample
+#     B = len(class_labels)
+#     label_B: torch.LongTensor = torch.tensor(class_labels, device=device)
+#     with torch.inference_mode():
+#             with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):    # using bfloat16 can be faster
+#                 recon_B3HW = var.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.96, g_seed=seed, more_smooth=more_smooth)
+
+#     # Normalize the tensor to [0, 1] range
+#     transformed_tensor = recon_B3HW.clamp(0, 1)  # Ensure values are in [0, 1]
+#     transformed_tensor = (transformed_tensor * 255).round().byte()  # Scale to [0, 255] and round
+
+#     # Pre-process all images into arrays
+#     image_arrays = [transformed_tensor[b_id].permute(1, 2, 0).cpu().numpy() for b_id in range(transformed_tensor.size(0))]
+
+#     # Convert arrays to images
+#     images = [Image.fromarray(img_array) for img_array in image_arrays]
+
+#     # Iterate over the images to save
+#     for b_id, img in enumerate(images):
+#         img_id = b_id
+#         file_name = f"{str(img_id).zfill(5)}.png"
+#         img.save(os.path.join(save_folder, file_name))
 
     # sample
     for i in range(num_steps):
@@ -131,6 +166,7 @@ def main():
             img_id = i * batch_size + b_id
             file_name = f"{str(img_id).zfill(5)}.png"
             img.save(os.path.join(save_folder, file_name))
+<<<<<<< Updated upstream
             
     output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")
 
@@ -141,5 +177,15 @@ def main():
     write_save_folder_to_file(output_txt_path,save_folder,num_images,sec_per_image)
     
     
+=======
+
+#     from npzmaker import create_npz_from_sample_folder
+
+#     # Create npz file and clean up
+#     create_npz_from_sample_folder(save_folder, num_images)
+#     os.system(f"rm -r {save_folder}")
+#     os.system(f"python evaluator.py /root/autodl-tmp/pretrained_models/VIRTUAL_imagenet256_labeled.npz f{save_folder}.npz")
+
+>>>>>>> Stashed changes
 if __name__ == "__main__":
     main()

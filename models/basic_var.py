@@ -90,6 +90,13 @@ class SelfAttention(nn.Module):
     def forward(self, x, attn_bias):
         B, L, C = x.shape
         
+        device = x.device  # 使用输入 x 的设备
+
+        # 简单粗暴：强制将所有参数和数据移动到 x.device
+        self.mat_qkv.weight.data = self.mat_qkv.weight.data.to(device)
+        
+        # print(x.device,self.mat_qkv.weight.device,self.q_bias.device)
+        
         qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)
         main_type = qkv.dtype
         # qkv: BL3Hc
@@ -154,6 +161,20 @@ class AdaLNSelfAttn(nn.Module):
             gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
         else:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
+        
+        device = x.device
+        self.ln_wo_grad = self.ln_wo_grad.to(device)
+        self.attn = self.attn.to(device)
+        self.ffn = self.ffn.to(device)
+        # self.drop_path = self.drop_path.to(device)
+        # if self.shared_aln:
+        #     self.ada_gss.data = self.ada_gss.data.to(device)
+        # else:
+        #     self.ada_lin = self.ada_lin.to(device)
+        
+        # print(x.device,self..weight.device,self.q_bias.device)
+        # print(x.device, scale1.device, scale2.device, shift1.device, shift2.device, gamma1.device, gamma2.device, getattr(attn_bias, 'device', 'None'))
+        
         x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
         x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
         return x

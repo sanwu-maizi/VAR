@@ -26,8 +26,6 @@ def main():
     setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
     from models import VQVAE, build_vae_var
 
-    MODEL_DEPTH = args.model_depth    # TODO: =====> please specify MODEL_DEPTH <=====
-    # assert MODEL_DEPTH in {16, 20, 24, 30}
     MODEL_DEPTH = 30    # TODO: =====> please specify MODEL_DEPTH <=====
     assert MODEL_DEPTH in {16, 20, 24, 30}
 
@@ -65,7 +63,6 @@ def main():
     seed = 0  # Fixed seed for reproducibility
     torch.manual_seed(seed)
     num_sampling_steps = 250
-    class_labels = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 980, 980, 437, 437, 22, 22, 562, 562)
     class_labels = (277,277,277,277,277,277,277,277, 980, 980, 437, 437, 22, 22, 562, 562)
     more_smooth = False
 

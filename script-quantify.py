@@ -29,6 +29,39 @@ def get_scale_importance_masks(patch_nums, important_scales):
         
     return important_mask, less_important_mask
 
+def get_scale_masks(patch_nums):
+    """
+    为每个scale生成独立的mask。
+    
+    Args:
+        patch_nums (tuple): 包含每个scale的patch数量，例如 (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+    
+    Returns:
+        list of torch.Tensor: 每个scale的mask列表，长度等于len(patch_nums)
+    """
+    # 计算总token数
+    total_tokens = sum(pn ** 2 for pn in patch_nums)
+    
+    # 初始化mask列表
+    scale_masks = []
+    
+    # 当前token位置
+    cur_pos = 0
+    
+    # 为每个scale生成mask
+    for pn in patch_nums:
+        num_tokens = pn ** 2  # 当前scale的token数量
+        # 创建全0的mask
+        mask = torch.zeros(total_tokens)
+        # 将当前scale的token设为1
+        mask[cur_pos:cur_pos + num_tokens] = 1.0
+        # 添加到mask列表
+        scale_masks.append(mask)
+        # 更新位置
+        cur_pos += num_tokens
+    
+    return scale_masks
+
 def enable_grad_for_model(model):
     """启用模型的梯度计算"""
     for param in model.parameters():
@@ -71,10 +104,8 @@ def compute_relative_error(original, quantized, eps=1e-8):
     relative_error = torch.mean(torch.abs(original - quantized) / (torch.abs(original) + eps))
     return relative_error.item()
 
-
 def var_mbq_entry(
     vae_model,
-    quantity_model,
     model,
     inputs,
     prompt_inputs,
@@ -83,7 +114,7 @@ def var_mbq_entry(
     scale_path: str = None,
     zero_point: bool = True,
     q_group_size: int = 128,
-    w_bit: int = 4,
+    w_bit: int = 16,
     a_bit: int = 16,
     wa_quant: bool = False,
     important_scales: int = 9,
@@ -100,7 +131,7 @@ def var_mbq_entry(
     assert scale_path is not None
     
     # 保存原始模型的权重（深拷贝以避免修改）
-    original_state_dict = copy.deepcopy(model.state_dict())
+    
 
     if run_mbq_process:
         # 将patch_nums添加到prompt_inputs中
@@ -109,7 +140,7 @@ def var_mbq_entry(
         
         mbq_results = run_mbq(
             vae_model=vae_model,
-            model= quantity_model,
+            model= model,
             prompt_inputs=prompt_inputs,    
             prompt_kwargs=inputs,
             w_bit=w_bit,
@@ -127,86 +158,87 @@ def var_mbq_entry(
         
         torch.save(mbq_results, scale_path)
         print(f"MBQ results saved at {scale_path}")
+        
+    print(model)
 
     if pseudo_quant:
         mbq_results = torch.load(scale_path, map_location="cuda")
         apply_mbq(model, mbq_results)
+        
+        original_state_dict = copy.deepcopy(model.state_dict())
 
         if not wa_quant:
             pseudo_quantize_model_weight(model, w_bit=w_bit, q_config=q_config)
         else:
             pseudo_quantize_model_weight_act(model, w_bit=w_bit, a_bit=a_bit)
     
-    # 获取量化后的模型权重
-    quantized_state_dict = model.state_dict()
+        # 获取量化后的模型权重
+        quantized_state_dict = model.state_dict()
 
-    # 计算每层的MSE
-    # 计算每层的误差指标并保存到文件
-    with open("/root/autodl-tmp/quantify/mse_results.txt", "a") as f:
-        print("\n=== Error Comparison of Parameters Before and After Quantization ===")
-        f.write("\n=== Error Comparison of Parameters Before and After Quantization ===\n")
-        
-        total_mse = 0.0
-        total_mae = 0.0
-        total_max_error = 0.0
-        total_relative_error = 0.0
-        param_count = 0
-        
-        for key in original_state_dict:
-            if 'weight' in key:  # 只比较权重参数
-                orig_weight = original_state_dict[key]
-                quant_weight = quantized_state_dict[key]
-                
-                # 计算各指标
-                mse = compute_mse(orig_weight, quant_weight)
-                mae = compute_mae(orig_weight, quant_weight)
-                max_error = compute_max_error(orig_weight, quant_weight)
-                rel_error = compute_relative_error(orig_weight, quant_weight)
-                
-                # 累加总和
-                total_mse += mse
-                total_mae += mae
-                total_max_error += max_error
-                total_relative_error += rel_error
-                param_count += 1
-                
-                # 打印和写入文件
-                # print(f"Layer '{key}':")
-                # print(f"  MSE: {mse:.6f}")
-                # print(f"  MAE: {mae:.6f}")
-                # print(f"  Max Absolute Error: {max_error:.6f}")
-                # print(f"  Relative Error: {rel_error:.6f}")
-                
-                f.write(f"Layer '{key}': ")
-                f.write(f"  MSE: {mse:.6f} ")
-                f.write(f"  MAE: {mae:.6f} ")
-                f.write(f"  Max Absolute Error: {max_error:.6f} ")
-                f.write(f"  Relative Error: {rel_error:.6f}\n")
+        # 计算每层的MSE
+        # 计算每层的误差指标并保存到文件
+        with open("/root/autodl-tmp/quantify/mse_results.txt", "a") as f:
+            print("\n=== Error Comparison of Parameters Before and After Quantization ===")
+            f.write("\n=== Error Comparison of Parameters Before and After Quantization ===\n")
 
-        # 计算平均值
-        if param_count > 0:
-            avg_mse = total_mse / param_count
-            avg_mae = total_mae / param_count
-            avg_max_error = total_max_error / param_count
-            avg_relative_error = total_relative_error / param_count
-            
-            print(f"\nAverage across all weight layers:")
-            print(f"  MSE: {avg_mse:.6f}")
-            print(f"  MAE: {avg_mae:.6f}")
-            print(f"  Max Absolute Error: {avg_max_error:.6f}")
-            print(f"  Relative Error: {avg_relative_error:.6f}")
-            
-            f.write(f"\nAverage across all weight layers: ")
-            f.write(f"  MSE: {avg_mse:.6f} ")
-            f.write(f"  MAE: {avg_mae:.6f} ")
-            f.write(f"  Max Absolute Error: {avg_max_error:.6f} ")
-            f.write(f"  Relative Error: {avg_relative_error:.6f}\n")
-        else:
-            print("No weight parameters found to compare.")
-            f.write("No weight parameters found to compare.\n")
+            total_mse = 0.0
+            total_mae = 0.0
+            total_max_error = 0.0
+            total_relative_error = 0.0
+            param_count = 0
 
+            for key in original_state_dict:
+                if 'weight' in key:  # 只比较权重参数
+                    orig_weight = original_state_dict[key]
+                    quant_weight = quantized_state_dict[key]
 
+                    # 计算各指标
+                    mse = compute_mse(orig_weight, quant_weight)
+                    mae = compute_mae(orig_weight, quant_weight)
+                    max_error = compute_max_error(orig_weight, quant_weight)
+                    rel_error = compute_relative_error(orig_weight, quant_weight)
 
+                    # 累加总和
+                    total_mse += mse
+                    total_mae += mae
+                    total_max_error += max_error
+                    total_relative_error += rel_error
+                    param_count += 1
+
+                    # 打印和写入文件
+                    # print(f"Layer '{key}':")
+                    # print(f"  MSE: {mse:.6f}")
+                    # print(f"  MAE: {mae:.6f}")
+                    # print(f"  Max Absolute Error: {max_error:.6f}")
+                    # print(f"  Relative Error: {rel_error:.6f}")
+
+                    f.write(f"Layer '{key}': ")
+                    f.write(f"  MSE: {mse:.6f} ")
+                    f.write(f"  MAE: {mae:.6f} ")
+                    f.write(f"  Max Absolute Error: {max_error:.6f} ")
+                    f.write(f"  Relative Error: {rel_error:.6f}\n")
+
+            # 计算平均值
+            if param_count > 0:
+                avg_mse = total_mse / param_count
+                avg_mae = total_mae / param_count
+                avg_max_error = total_max_error / param_count
+                avg_relative_error = total_relative_error / param_count
+
+                print(f"\nAverage across all weight layers:")
+                print(f"  MSE: {avg_mse:.6f}")
+                print(f"  MAE: {avg_mae:.6f}")
+                print(f"  Max Absolute Error: {avg_max_error:.6f}")
+                print(f"  Relative Error: {avg_relative_error:.6f}")
+
+                f.write(f"\nAverage across all weight layers: ")
+                f.write(f"  MSE: {avg_mse:.6f} ")
+                f.write(f"  MAE: {avg_mae:.6f} ")
+                f.write(f"  Max Absolute Error: {avg_max_error:.6f} ")
+                f.write(f"  Relative Error: {avg_relative_error:.6f}\n")
+            else:
+                print("No weight parameters found to compare.")
+                f.write("No weight parameters found to compare.\n")
 
     return model
 
@@ -217,8 +249,8 @@ if __name__ == "__main__":
     parser.add_argument("--depth", type=int, default=30)
     parser.add_argument("--cfg", type=float, default=1.5)
     parser.add_argument("--scale_path", type=str, default="/root/autodl-tmp/quantify/var_mbq_scales_w_16.pt")
-    parser.add_argument("--w_bit", type=int, default=16)
-    parser.add_argument("--a_bit", type=int, default=16)
+    parser.add_argument("--w_bit", type=int, default=4)
+    parser.add_argument("--a_bit", type=int, default=4)
     parser.add_argument("--important_scales", type=int, default=3)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
     parser.add_argument('--num_images', type=int, required=False, help="Number of images to generate",default=50000)
@@ -247,11 +279,6 @@ if __name__ == "__main__":
     patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    vae, var_quantity = build_vae_var(
-        V=4096, Cvae=32, ch=160, share_quant_resi=4,
-        device=device, patch_nums=patch_nums,
-        num_classes=1000, depth=args.depth, shared_aln=False,
-    )
     vae, var = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,
         device=device, patch_nums=patch_nums,
@@ -261,14 +288,12 @@ if __name__ == "__main__":
     # 加载checkpoints
     vae.load_state_dict(torch.load(args.vae_ckpt, map_location='cuda'), strict=True)
     var.load_state_dict(torch.load(args.ckpt_path, map_location='cuda'), strict=True)
-    var_quantity.load_state_dict(torch.load(args.ckpt_path, map_location='cuda'), strict=True)
     vae.eval()
-    var.eval()
-    var_quantity.train()
+    var.train()
 
     # 准备示例输入用于量化
-    B = 125  # 小批量用于量化
-    batch_size = 8 
+    B = 50  # 小批量用于量化
+    batch_size = 1000//B 
     
     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
         return x.add(x).add_(-1)
@@ -292,7 +317,7 @@ if __name__ == "__main__":
     if len(subfolders) < 1000:
         raise ValueError(f"子文件夹数量 ({len(subfolders)}) 小于批量大小 B ({B})")
         
-    subfolders = subfolders[::8]
+    subfolders = subfolders[::batch_size]
 
     # 初始化存储图片的列表
     inp_B3HW = []
@@ -355,7 +380,7 @@ if __name__ == "__main__":
     x_BLCv_wo_first_l = torch.cat(x_BLCv_wo_first_l_all, dim=0).to(device)
     
     # print(len(gt_BL),len(x_BLCv_wo_first_l))
-    print("hellow",gt_BL.size(), x_BLCv_wo_first_l.size())
+    # print("hellow",gt_BL.size(), x_BLCv_wo_first_l.size())
 
     
     # print(x_BLCv_wo_first_l.shape)
@@ -373,21 +398,24 @@ if __name__ == "__main__":
     # 获取mask
     important_mask, less_important_mask = get_scale_importance_masks(patch_nums, args.important_scales)
     
+    # 生成 scale_masks 列表
+    scale_masks = get_scale_masks(patch_nums)
+    
     # 准备prompt_inputs
     prompt_inputs = {
         "vision_mask": important_mask,
-        "caption_mask": less_important_mask
+        "caption_mask": less_important_mask,
+        "scale_masks": scale_masks  # 传入所有mask的列表
     }
 
     # 进行MBQ量化
     quantized_var = var_mbq_entry(
         vae_model=vae,
-        quantity_model=var_quantity,
         model=var,
         inputs=prompt_kwargs,
         prompt_inputs=prompt_inputs,
         run_mbq_process=True,
-        pseudo_quant=True,
+        pseudo_quant=False,
         scale_path=args.scale_path,
         w_bit=args.w_bit,
         a_bit=args.a_bit,
@@ -396,6 +424,10 @@ if __name__ == "__main__":
         reweight=True,
         patch_nums=patch_nums
     )
+    
+    quantized_var.to(device)
+    quantized_var.eval()
+    print(quantized_var)
     
     # set args
     num_images = args.num_images

@@ -30,6 +30,17 @@ except ImportError:
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
 
 
+class IdentityScaleLayer(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        # Initialize a learnable scale parameter set to 1 for each channel
+        self.scale = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # x: [B, L, C]
+        return x * self.scale.view(1, 1, -1)  # Broadcasting across batch and sequence dimensions
+    
+
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_if_available=True):
         super().__init__()

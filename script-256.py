@@ -16,10 +16,6 @@ def main():
     parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=128)
     parser.add_argument('--cfg', type=float, required=False, help="Classifier-free guidance scale",default=1.5)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
-<<<<<<< Updated upstream
-    parser.add_argument('--model_depth', type=int, required=False,default=30)
-=======
->>>>>>> Stashed changes
     args = parser.parse_args()
 
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
@@ -66,11 +62,7 @@ def main():
     class_labels = (277,277,277,277,277,277,277,277, 980, 980, 437, 437, 22, 22, 562, 562)
     more_smooth = False
 
-<<<<<<< Updated upstream
-    save_folder = os.path.join(output_dir, "256-depth{}-ariter{}-diffsteps{}-cfg{}-image{}".format(MODEL_DEPTH, num_iter, num_sampling_steps, cfg, num_images))
-=======
     save_folder = os.path.join(output_dir, "1256-ariter{}-diffsteps{}-cfg{}-image{}".format(num_iter, num_sampling_steps, cfg, num_images))
->>>>>>> Stashed changes
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     num_steps = num_images // batch_size + 1
@@ -163,18 +155,6 @@ def main():
             img_id = i * batch_size + b_id
             file_name = f"{str(img_id).zfill(5)}.png"
             img.save(os.path.join(save_folder, file_name))
-<<<<<<< Updated upstream
-            
-    output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")
-
-    # 确保 output 文件夹存在
-    os.makedirs("/root/autodl-tmp/outputs", exist_ok=True)
-
-    sec_per_image=used_time / gen_img_cnt
-    write_save_folder_to_file(output_txt_path,save_folder,num_images,sec_per_image)
-    
-    
-=======
 
 #     from npzmaker import create_npz_from_sample_folder
 
@@ -183,6 +163,5 @@ def main():
 #     os.system(f"rm -r {save_folder}")
 #     os.system(f"python evaluator.py /root/autodl-tmp/pretrained_models/VIRTUAL_imagenet256_labeled.npz f{save_folder}.npz")
 
->>>>>>> Stashed changes
 if __name__ == "__main__":
     main()

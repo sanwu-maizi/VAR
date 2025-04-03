@@ -11,12 +11,11 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 
 from models.basic_var import AdaLNSelfAttn
 
-from .qmodule import ScaledActivation
+from .qmodule import ScaledActivation, IdentityScaleLayer, ScaledDynamicFC
 from qmllm.utils.search import get_op_by_name, get_op_name, set_op_by_name
 from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
 
 __all__ = ["auto_scale_block", "apply_scale"]
-
 
 @torch.no_grad()
 def get_weight_scale(weight, q_group_size=-1):   #计算权重的缩放因子
@@ -95,7 +94,7 @@ def scale_gelu_fc(gelu, fc, scales):
 
 
 @torch.no_grad()
-def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, loss_mode="mae"):
+def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, loss_mode="mae", scale_masks=None):
 
     # firstly, get the weight quantize function
     if w_bit is not None:
@@ -150,46 +149,53 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             #     (org_out - out).float().pow(2).mean().item()
             # )  # float prevents overflow
 
+            # if loss_mode == "mse":
+            #     if ans_mask is not None and vis_mask is not None:
+            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+            #         vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
+            #         masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
+            #         masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
+            #         if reweight_ratio is not None:
+            #             loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
+            #         else:
+            #             loss = (
+            #                 (org_out - out).float().pow(2).mean().item()
+            #             ) 
+            #     elif ans_mask is not None and vis_mask is None:
+            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+            #         masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
+            #         loss = masked_diff.sum() / ans_mask_expand.sum() 
+            #     else:
+            #         loss = (
+            #             (org_out - out).float().pow(2).mean().item()
+            #         )  # float prevents overflow
             if loss_mode == "mse":
-                if ans_mask is not None and vis_mask is not None:
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
-                    masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
-                    if reweight_ratio is not None:
-                        loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
-                    else:
-                        loss = (
-                            (org_out - out).float().pow(2).mean().item()
-                        ) 
-                elif ans_mask is not None and vis_mask is None:
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
-                    loss = masked_diff.sum() / ans_mask_expand.sum() 
+                loss = 0.0
+                if reweight_ratio is not None:  # reweight_ratio 是二维字典，例如 {"attn": {0: 1.5, 1: 1.2, ...}}
+                    for scale_idx, scale_mask in enumerate(scale_masks):
+                        scale_mask_expand = scale_mask.unsqueeze(-1).expand_as(out).to(out.device)
+                        masked_diff = ((org_out - out).float().pow(2) * scale_mask_expand)
+                        scale_loss = masked_diff.sum() / scale_mask_expand.sum()
+                        # 从 reweight_ratio 中获取当前层的对应 scale_idx 的权重
+                        if scale_idx in reweight_ratio:
+                            loss += reweight_ratio[scale_idx] * scale_loss
+                        else:
+                            loss += scale_loss  # 如果没有指定权重，默认权重为 1
                 else:
-                    loss = (
-                        (org_out - out).float().pow(2).mean().item()
-                    )  # float prevents overflow
+                    loss = (org_out - out).float().pow(2).mean().item()
             elif loss_mode == "mae":
-                if ans_mask is not None and vis_mask is not None:
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = ((org_out - out).float().abs() * ans_mask_expand)
-                    masked_diff_vis = ((org_out - out).float().abs() * vis_mask_expand)
-                    if reweight_ratio is not None:
-                        loss = (masked_diff_ans.sum() + reweight_ratio * masked_diff_vis.sum()) / (ans_mask_expand.sum() + vis_mask_expand.sum())
-                    else:
-                        loss = (
-                            (org_out - out).float().abs().mean().item()
-                        ) 
-                elif ans_mask is not None and vis_mask is None:
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = ((org_out - out).float().abs() * ans_mask_expand)
-                    loss = masked_diff.sum() / ans_mask_expand.sum() 
+                loss = 0.0
+                if reweight_ratio is not None:  # reweight_ratio 是二维字典，例如 {"attn": {0: 1.5, 1: 1.2, ...}}
+                    for scale_idx, scale_mask in enumerate(scale_masks):
+                        scale_mask_expand = scale_mask.unsqueeze(-1).expand_as(out).to(out.device)
+                        masked_diff = ((org_out - out).float().abs() * scale_mask_expand)
+                        scale_loss = masked_diff.sum() / scale_mask_expand.sum()
+                        if scale_idx in reweight_ratio:
+                            loss += reweight_ratio[scale_idx] * scale_loss
+                        else:
+                            loss += scale_loss  # 如果没有指定权重，默认权重为 1
                 else:
-                    loss = (
-                        (org_out - out).float().abs().mean().item()
-                    )  # float prevents overflow
+                    loss = (org_out - out).float().abs().mean().item()
 
             history.append(loss)
             is_best = loss < best_error
@@ -205,16 +211,23 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         best_scales = best_scales.view(-1)
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
-        return best_scales.detach()
+        
+        #mark
+        return best_scales.detach(), best_error
 
     def _auto_get_scale(prev_op, layers, inp, reweight_ratio=None, module2inspect=None, kwargs={}):
         # module2inspect: if given, we will check the output diff of this module instead of layers
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
+            
+        #mark
 
-        scales = _search_module_scale(module2inspect, layers, inp, reweight_ratio, kwargs)
+        scales,loss = _search_module_scale(module2inspect, layers, inp, reweight_ratio, kwargs)
         scales = scales.detach().cpu()
+        
+        # if prev_op==module.ffn.act:
+            # print(scales,loss)
         # prev_op_name, [layer_name], scale
         return (
             get_op_name(module, prev_op),
@@ -249,35 +262,26 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         )
 
         # fc1: quantize fc1
-#         scales_list.append(
-#             _auto_get_scale(
-#                 prev_op=module.ln_wo_grad,  # 再次使用 ln_wo_grad 作为 MLP 的前置归一化
-#                 layers=[module.ffn.fc1],
-#                 inp=input_feat["ffn.fc1"],
-#                 reweight_ratio=reweight_ratio_dict.get("mlp", None),
-#                 module2inspect=module.ffn,
-#             )
-#         )
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.ln_wo_grad,  # 再次使用 ln_wo_grad 作为 MLP 的前置归一化
+                layers=[module.ffn.fc1],
+                inp=input_feat["ffn.fc1"],
+                reweight_ratio=reweight_ratio_dict.get("mlp", None),
+                module2inspect=module.ffn,
+            )
+        )
 
-#         # fc2: quantize fc2
-#         scales_list.append(
-#             _auto_get_scale(
-#                 prev_op=module.ffn.fc1,
-#                 layers=[module.ffn.fc2],
-#                 inp=input_feat["ffn.fc2"],
-#                 reweight_ratio=reweight_ratio_dict.get("mlp", None),
-#             )
-#         )
-
-        # # ada_lin: quantize ada_lin.1 (可选)
-        # scales_list.append(
-        #     _auto_get_scale(
-        #         prev_op=module.ada_lin[0],  # 假设 SiLU 是前置激活
-        #         layers=[module.ada_lin[1]],
-        #         inp=input_feat["ada_lin.1"],
-        #         reweight_ratio=reweight_ratio_dict.get("ada", None),
-        #     )
-        # )
+        # fc2: quantize fc2
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.ffn.act,
+                layers=[module.ffn.fc2],
+                inp=input_feat["ffn.fc2"],
+                reweight_ratio=reweight_ratio_dict.get("mlp", None),
+            )
+        )
+        
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
@@ -296,20 +300,31 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         for layer in layers:
             layer = layer.to(device)
         scales = scales.to(device)
+        
+        # print(prev_op)
 
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
         elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm)) or prev_op.__class__.__name__ == "InternLM2RMSNorm" or prev_op.__class__.__name__ == "Qwen2RMSNorm":
-            scale_ln_fcs(prev_op, layers, scales)
+            if "fc1" in layer_names[0]:
+                new_module = ScaledDynamicFC(layers[0], scales)
+                set_op_by_name(module, layer_names[0], new_module)
+                # 调整 fc1 的权重，补偿输入端的除法
+                new_module.fc.weight.data *= scales.view(1, -1)  # 乘以 scales，作用于输入通道
+            else:
+                scale_ln_fcs(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation)):
+            # print(prev_op,scales)
             new_module = ScaledActivation(prev_op, scales)
             set_op_by_name(module, prev_op_name, new_module)
             scale_gelu_fc(prev_op, layers[0], scales)
-        # elif isinstance(prev_op, AdaLNSelfAttn):  # 针对VAR模型的特定层
-            # 处理AdaLNSelfAttn的缩放
-            # scale_ln_fcs(prev_op.ln_wo_grad, layers, scales)  # 使用ln_wo_grad进行缩放
+            # print(prev_op_name,prev_op)
+        elif isinstance(prev_op, ScaledActivation):
+            # 如果已经是 ScaledActivation，直接应用缩放
+            # print(scales,layers)
         else:
+            # print(prev_op,scales)
             raise NotImplementedError(f"prev_op {type(prev_op)} not supported yet!")
 
         # apply the scaling to input feat if given

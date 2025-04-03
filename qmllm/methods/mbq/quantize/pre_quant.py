@@ -40,11 +40,29 @@ except ImportError:
 
 __all__ = ["run_mbq"]
 
+# 假设已有 get_scale_masks 函数
+def get_scale_masks(patch_nums):
+    total_tokens = sum(pn ** 2 for pn in patch_nums)
+    scale_masks = []
+    cur_pos = 0
+    for pn in patch_nums:
+        num_tokens = pn ** 2
+        mask = torch.zeros(total_tokens)
+        mask[cur_pos:cur_pos + num_tokens] = 1.0
+        scale_masks.append(mask)
+        cur_pos += num_tokens
+    return scale_masks
+
 
 class GradCacheHook:    
-    def __init__(self, vis_masks, cap_masks, log_file="/root/autodl-tmp/quantify/grad_cache.txt", plot_dir="/root/autodl-tmp/quantify/plots"):
+    def __init__(self, vis_masks, cap_masks, scale_masks, log_file="/root/autodl-tmp/quantify/grad_cache.txt", plot_dir="/root/autodl-tmp/quantify/plots"):
         if vis_masks is None or cap_masks is None:
             raise ValueError
+            
+        if not scale_masks:
+            raise ValueError("Scale masks cannot be empty")
+        
+        self.scale_masks = [mask.cpu() for mask in scale_masks]  # 所有scale的mask列表
 
         self.hooks = []
         self.steps = {}
@@ -75,7 +93,7 @@ class GradCacheHook:
         if name not in self.steps:
             self.steps[name] = 0
         if name not in self.grad_dict:
-            self.grad_dict[name] = []
+            self.grad_dict[name] = {}
         if name not in self.grad_matrices:
             self.grad_matrices[name] = []
 
@@ -91,23 +109,33 @@ class GradCacheHook:
             # print("grad_shape",len(grad_shape))
             # B, N, C = grad_shape
 
-            # 计算梯度的平均绝对值
-            grad_mean = output_grad.abs().mean()
+#             # 计算梯度的平均绝对值
+#             grad_mean = output_grad.abs().mean()
 
-            # 存储梯度均值
-            self.grad_dict[name].append(grad_mean.detach().cpu())
+#             # 存储梯度均值
+#             self.grad_dict[name].append(grad_mean.detach().cpu())
+            
+            #scale_reweight_ratio_dict_all
+            B, N, C = output_grad.shape
+            for batch_idx in range(B):
+                for scale_idx, mask in enumerate(self.scale_masks):
+                    if scale_idx not in self.grad_dict[name]:
+                        self.grad_dict[name][scale_idx] = []
+                    scale_grad = output_grad[batch_idx][mask.bool()]  # 使用当前scale的mask提取梯度
+                    grad_mean = scale_grad.abs().mean()  # 计算平均绝对值
+                    self.grad_dict[name][scale_idx].append(grad_mean.detach().cpu())
 
             # 计算批量平均的梯度矩阵 [N, C]
             grad_matrix = output_grad.abs().mean(dim=0)  # [N, C]
             self.grad_matrices[name].append(grad_matrix.detach().cpu())
 
             # 使用 logger 记录梯度信息到本地 txt 文件
-            self.logger.info(f"Step {step} - Layer: {name}")
-            self.logger.info(f"  Gradient shape: {grad_shape}")
-            self.logger.info(f"  Gradient mean abs value: {grad_mean.item():.6f}")
-            self.logger.info(f"  Gradient max abs value: {output_grad.abs().max().item():.6f}")
-            self.logger.info(f"  Gradient min abs value: {output_grad.abs().min().item():.6f}")
-            self.logger.info("-" * 50)
+            # self.logger.info(f"Step {step} - Layer: {name}")
+            # self.logger.info(f"  Gradient shape: {grad_shape}")
+            # self.logger.info(f"  Gradient mean abs value: {grad_mean.item():.6f}")
+            # self.logger.info(f"  Gradient max abs value: {output_grad.abs().max().item():.6f}")
+            # self.logger.info(f"  Gradient min abs value: {output_grad.abs().min().item():.6f}")
+            # self.logger.info("-" * 50)
 
             self.steps[name] += 1
 
@@ -166,7 +194,7 @@ class GradCacheHook:
 
     def register_hooks(self, layers):
         for n, m in layers.named_modules():
-            if isinstance(m, nn.Linear):
+            if isinstance(m, nn.Linear) and any([_ in n for _ in ["attn", "ffn"]]):
                 # print(f"Registering hook for layer.{n}")
                 self.hooks.append(
                     m.register_full_backward_hook(
@@ -188,17 +216,25 @@ class GradCacheHook:
     def get_avg_grad_dict(self):
         avg_grad_dict = {}
 
-        for name, grad_values in self.grad_dict.items():
-#             mean_vis = torch.mean(torch.stack(grad_values["vis_grad"]))
-#             mean_cap = torch.mean(torch.stack(grad_values["cap_grad"]))
+#         for name, grad_values in self.grad_dict.items():
+# #             mean_vis = torch.mean(torch.stack(grad_values["vis_grad"]))
+# #             mean_cap = torch.mean(torch.stack(grad_values["cap_grad"]))
 
-#             avg_grad_dict[name] = {
-#                 "vis_avg_grad": mean_vis.item(),
-#                 "cap_avg_grad": mean_cap.item()
-#             }
-            # grad_values 是每次前向传播的 grad_mean 列表
-            mean_grad = torch.mean(torch.stack(grad_values))
-            avg_grad_dict[name] = mean_grad.item()
+# #             avg_grad_dict[name] = {
+# #                 "vis_avg_grad": mean_vis.item(),
+# #                 "cap_avg_grad": mean_cap.item()
+# #             }
+#             # grad_values 是每次前向传播的 grad_mean 列表
+#             mean_grad = torch.mean(torch.stack(grad_values))
+#             avg_grad_dict[name] = mean_grad.item()
+
+            
+        #  scale_reweight_ratio_dict_all
+
+        for name, scale_grads in self.grad_dict.items():
+            avg_grad_dict[name] = {}
+            for scale_key, grad_list in scale_grads.items():
+                avg_grad_dict[name][scale_key] = torch.mean(torch.stack(grad_list)).item()
 
         return avg_grad_dict
     
@@ -230,8 +266,9 @@ def process_input(prompt_inputs, prompt_kwargs):
     caption_mask = inputs.pop("caption_mask", None)
     patch_nums = inputs.pop("patch_nums", None)
     important_scales = inputs.pop("important_scales", None)
+    scale_masks = inputs.pop("scale_masks",None)
     
-    return inputs, vision_mask, caption_mask, patch_nums, important_scales
+    return inputs, vision_mask, caption_mask, patch_nums, important_scales, scale_masks
 
 class NoInplaceWrapper(nn.Module):
     """临时包装器，将inplace操作转换为非inplace操作"""
@@ -277,6 +314,32 @@ class NoInplaceWrapper(nn.Module):
                         ffn_out = self.ffn(x_scaled2)                   # FFN 计算
                         ffn_out_scaled = ffn_out * gamma2               # 缩放，非原地
                         x = x + self.drop_path(ffn_out_scaled)          # 残差连接，非原地
+                        
+                        # 初始输入 x
+#                         print(f"x.shape = {x.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 1. 归一化操作
+#                         x_norm2 = self.ln_wo_grad(x)  # LayerNorm (形状不变)
+#                         print(f"x_norm2.shape = {x_norm2.shape}")  # (B, S, D), 同输入
+
+#                         # 2. 缩放和偏移 (scale2/shift2 形状为 (D,))
+#                         print(f"scale2.shape = {scale2.shape}")  # (D,), 例如 (768,)
+#                         print(f"shift2.shape = {shift2.shape}")  # (D,), 例如 (768,)
+#                         x_scaled2 = x_norm2 * (scale2 + 1) + shift2  # 广播到 (B, S, D)
+#                         print(f"x_scaled2.shape = {x_scaled2.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 3. FFN 计算 (假设 FFN 是线性层: D -> 4D -> D)
+#                         ffn_out = self.ffn(x_scaled2)  # 输入输出形状通常相同
+#                         print(f"ffn_out.shape = {ffn_out.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 4. FFN 输出缩放 (gamma2 形状为 (D,))
+#                         print(f"gamma2.shape = {gamma2.shape}")  # (D,), 例如 (768,)
+#                         ffn_out_scaled = ffn_out * gamma2  # 广播到 (B, S, D)
+#                         print(f"ffn_out_scaled.shape = {ffn_out_scaled.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 5. 残差连接 (drop_path 不改变形状)
+#                         x = x + self.drop_path(ffn_out_scaled)  # 形状不变
+#                         print(f"x.shape (after residual) = {x.shape}")  # (B, S, D), 例如 (32, 128, 768)
 
                         return x
                     
@@ -310,10 +373,11 @@ class NoInplaceWrapper(nn.Module):
                         # 使用 clone() 确保输入不被修改
                         x = x.clone()
                         
-                        # device = x.device  # 使用输入 x 的设备
+#                         device = x.device  # 使用输入 x 的设备
 
-                        # 简单粗暴：强制将所有参数和数据移动到 x.device
-                        # self.mat_qkv.weight.data = self.mat_qkv.weight.data.to(device)
+#                         # 简单粗暴：强制将所有参数和数据移动到 x.device
+#                         self.mat_qkv.weight.data = self.mat_qkv.weight.data.to(device)
+                        # print(x.device,self.mat_qkv.weight.device,self.q_bias.device,)
                         
                         qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)
                         main_type = qkv.dtype
@@ -441,7 +505,7 @@ def run_mbq(
 #     # patch layer 0 to catch input and kwargs
     # layers[0] = Catcher(layers[0])
 
-    inputs, vision_mask, caption_mask, patch_nums, important_scales = process_input(prompt_inputs, prompt_kwargs)
+    inputs, vision_mask, caption_mask, patch_nums, important_scales, scale_masks = process_input(prompt_inputs, prompt_kwargs)
     
     
     label_B = prompt_kwargs["label_B"]
@@ -493,7 +557,7 @@ def run_mbq(
     
     print("Save gradient...")
     # save gradient
-    grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask)        
+    grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask, scale_masks=scale_masks)        
     grad_cache.register_hooks(layers=layers)
 
     # 分批计算梯度
@@ -526,16 +590,40 @@ def run_mbq(
     del grad_cache
     
     # 计算reweight_ratio_dict
-    reweight_ratio_dict = {}
-    for name, grads in grad_avg_dict.items():
-        # important_grad = grads["important_grad"]
-        # less_important_grad = grads["less_important_grad"]
-        # ratio = important_grad / (important_grad + less_important_grad + 1e-5)
-        # reweight_ratio_dict[name] = ratio
-        reweight_ratio_dict[name]=None
-        
-        
+    # reweight_ratio_dict = {}
+    # for name, grads in grad_avg_dict.items():
+    #     # important_grad = grads["important_grad"]
+    #     # less_important_grad = grads["less_important_grad"]
+    #     # ratio = important_grad / (important_grad + less_important_grad + 1e-5)
+    #     # reweight_ratio_dict[name] = ratio
+    #     reweight_ratio_dict[name]=None
     
+    # 计算 attn 和 mlp 的梯度比率，并保存到 scale_reweight_ratio_dict   scale_masks_here
+    attn_list = []
+    mlp_list = []
+    scale_reweight_ratio_dict_all = {}  # 保存所有层的比率
+
+    for name, grads in grad_avg_dict.items():
+        # 计算当前层所有 patch 的平均梯度
+        all_patch_avg_grad = np.mean(list(grads.values())) if grads else 0.0
+        
+        scale_reweight_ratio_dict_all[name] = {}
+        for scale_key, grad in grads.items():
+            # 当前 patch 梯度与所有 patch 平均值的比率
+            ratio = grad / (all_patch_avg_grad + 1e-6)
+            scale_reweight_ratio_dict_all[name][scale_key] = ratio
+            
+            # 根据层类型添加到 attn_list 或 mlp_list
+            if "attn" in name or "proj" in name:
+                attn_list.append(ratio)
+            elif "ffn" in name or "fc1" in name or "fc2" in name:
+                mlp_list.append(ratio)
+                
+                
+    # 计算中位数
+    attn_median = np.median(attn_list) if attn_list else 1.0
+    mlp_median = np.median(mlp_list) if mlp_list else 1.0
+        
     # 模拟 VAR 的 forward 逻辑，生成 x_BLC, cond_BD, 和 attn_bias
     B = x_BLCv_wo_first_l.shape[0]
     with torch.cuda.amp.autocast(enabled=False):
@@ -567,6 +655,7 @@ def run_mbq(
         "cond_BD": cond_BD_or_gss,
         "attn_bias": attn_bias,
     }
+    
     
     # 创建module_kwargs
     module_kwargs = {
@@ -621,6 +710,26 @@ def run_mbq(
         # 直接使用传入的 reweight_ratio_dict，无需重新计算
         ans_mask = None  # 移除 reweight 逻辑，设置为 None
         vis_mask = None
+        
+        # 简化 reweight_ratio_dict 赋值，使用 scale_masks_here 的数量
+        reweight_ratio_dict = {}
+        num_patches = len(scale_masks)  # 通过 scale_masks 的第一维度判断 patch 个数
+        for name in named_linears:
+            reweight_ratio_dict[name] = {}
+            layer_idx_str = str(i)
+            # 遍历 scale_reweight_ratio_dict_all，查找当前层
+            for full_name, scale_dict in scale_reweight_ratio_dict_all.items():
+                name_parts = full_name.split(".")
+                if layer_idx_str in name_parts:  # 检查是否为当前层
+                    for scale_idx in range(num_patches):
+                        ratio = scale_dict.get(scale_idx, 1.0)  # 默认值为 1.0
+                        if "attn" in name_parts or "proj" in name_parts:
+                            if name in ["attn.mat_qkv", "attn.proj"]:  # 只处理当前层的 attn 相关线性层
+                                reweight_ratio_dict[name][scale_idx] = max(ratio, attn_median)
+                        elif "ffn" in name_parts or "fc1" in name_parts or "fc2" in name_parts:
+                            if name in ["ffn.fc1", "ffn.fc2"]:  # 只处理当前层的 ffn 相关线性层
+                                reweight_ratio_dict[name][scale_idx] = max(ratio, mlp_median)
+                
 
         # 执行量化
         if wa_quant:  # wa_quant 默认设为 True
@@ -646,7 +755,8 @@ def run_mbq(
                 ans_mask=ans_mask,
                 vis_mask=vis_mask,
                 reweight_ratio_dict=reweight_ratio_dict,
-                loss_mode=loss_mode
+                loss_mode=loss_mode,
+                scale_masks=scale_masks  # 添加 scale_masks 参数
             )
         
         # 应用缩放

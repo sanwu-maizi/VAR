@@ -8,39 +8,15 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
     # 打开文件准备写入
     with open(output_txt_path, "a") as f:
         # 写入 save_folder
-        f.write("save_folder: {}, {:.5f} sec per image\n".format(save_folder,sec_per_image))
+#         f.write("save_folder: {}, {:.5f} sec per image\n".format(save_folder,sec_per_image))
 
-#         # 计算指标
-#         input2 = None
-#         fid_statistics_file = '/root/autodl-tmp/pretrained_models/adm_in256_stats.npz'
-#         metrics_dict = torch_fidelity.calculate_metrics(
-#             input1=save_folder,
-#             input2=fid_statistics_file,
-#             fid_statistics_file=fid_statistics_file,
-#             cuda=True,
-#             isc=True,
-#             fid=True,
-#             kid=False,
-#             prc=True,
-#             verbose=False,
-#         )
-#         print(metrics_dict)
-#         fid = metrics_dict['frechet_inception_distance']
-#         inception_score = metrics_dict['inception_score_mean']
-#         precision = metrics_dict['precision']
-#         recall = metrics_dict['recall']
-
-#         # 写入 FID 和 Inception Score 等信息
-#         f.write("fide:\n")
-#         f.write(f"FID: {fid:.4f}, Inception Score: {inception_score:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}\n")
-
-        # 创建 npz 文件并清理文件夹
-        create_npz_from_sample_folder(save_folder, num_images)
-        shutil.rmtree(save_folder)
+#         # 创建 npz 文件并清理文件夹
+#         create_npz_from_sample_folder(save_folder, num_images)
+#         shutil.rmtree(save_folder)
 
         # 计算 OpenAI 指标
         inception_score, fid, sfid, prec, recall = compute_metrics(
-            "/root/autodl-tmp/pretrained_models/VIRTUAL_imagenet256_labeled.npz",
+            "/root/autodl-tmp/pretrained_models/adm_stats_512.npz",
             f"{save_folder}.npz"
         )
 
@@ -51,8 +27,8 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
     print(f"Results have been saved to {output_txt_path}")
     
 if __name__ == "__main__":
-    save_folder="/root/autodl-tmp/outputs/256-depth30-ariter32-diffsteps250-cfg1.5-image50000"
-    num_images=50000
+    save_folder="/root/autodl-tmp/pretrained_models/sito0.5-downsample4"
+    num_images=5000
 
     # 定义输出文件路径
     output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")

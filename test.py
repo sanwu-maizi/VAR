@@ -8,15 +8,15 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
     # 打开文件准备写入
     with open(output_txt_path, "a") as f:
         # 写入 save_folder
-#         f.write("save_folder: {}, {:.5f} sec per image\n".format(save_folder,sec_per_image))
+        f.write("save_folder: {}, {:.5f} sec per image\n".format(save_folder,sec_per_image))
 
-#         # 创建 npz 文件并清理文件夹
-#         create_npz_from_sample_folder(save_folder, num_images)
-#         shutil.rmtree(save_folder)
+        # 创建 npz 文件并清理文件夹
+        create_npz_from_sample_folder(save_folder, num_images)
+        shutil.rmtree(save_folder)
 
         # 计算 OpenAI 指标
         inception_score, fid, sfid, prec, recall = compute_metrics(
-            "/root/autodl-tmp/pretrained_models/adm_stats_512.npz",
+            "/root/autodl-tmp/pretrained_models/VIRTUAL_imagenet256_labeled.npz",
             f"{save_folder}.npz"
         )
 
@@ -27,8 +27,8 @@ def write_save_folder_to_file(output_txt_path, save_folder,num_images,sec_per_im
     print(f"Results have been saved to {output_txt_path}")
     
 if __name__ == "__main__":
-    save_folder="/root/autodl-tmp/pretrained_models/sito0.5-downsample4"
-    num_images=5000
+    save_folder="/root/autodl-tmp/outputs/Quantify-256-w_bit6-a_bit6-image50000-wa_quantTrue"
+    num_images=50000
 
     # 定义输出文件路径
     output_txt_path = os.path.join("/root/autodl-tmp/outputs", "results.txt")

@@ -20,26 +20,27 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 from qmllm.utils.search import append_str_prefix, get_op_name
 
-from qmllm.methods.mbq.quantize.auto_scale_wa_distort_var import auto_scale_block_wa_distort
+from qmllm.methods.mbq.quantize.auto_scale_wa_distort import auto_scale_block_wa_distort
 from qmllm.methods.mbq.quantize.auto_scale_wa_var import auto_scale_block_wa
-from qmllm.methods.mbq.quantize.auto_scale_distort_var import auto_scale_block_distort
+from qmllm.methods.mbq.quantize.auto_scale_distort import auto_scale_block_distort
 from qmllm.methods.mbq.quantize.auto_scale_var import auto_scale_block, apply_scale
+# from qmllm.methods.mbq.quantize.auto_scale_var import auto_scale_var_block, apply_scale
 from qmllm.quantization.qlinear import WALinear
 from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
 from .quantizer import get_module_by_name_suffix
 import logging
 import torch.nn.functional as F
-try:
-    from torch.nn.functional import scaled_dot_product_attention as slow_attn
+try: from torch.nn.functional import scaled_dot_product_attention as slow_attn    # q, k, v: BHLc
 except ImportError:
     def slow_attn(query, key, value, scale: float, attn_mask=None, dropout_p=0.0):
-        attn = query.mul(scale) @ key.transpose(-2, -1)
-        if attn_mask is not None:
-            attn.add_(attn_mask)
+        attn = query.mul(scale) @ key.transpose(-2, -1) # BHLc @ BHcL => BHLL
+        if attn_mask is not None: attn.add_(attn_mask)
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
+
 
 __all__ = ["run_mbq"]
 
+# 假设已有 get_scale_masks 函数
 def get_scale_masks(patch_nums):
     total_tokens = sum(pn ** 2 for pn in patch_nums)
     scale_masks = []
@@ -52,30 +53,36 @@ def get_scale_masks(patch_nums):
         cur_pos += num_tokens
     return scale_masks
 
-class GradCacheHook:
+
+class GradCacheHook:    
     def __init__(self, vis_masks, cap_masks, scale_masks, log_file="/root/autodl-tmp/quantify/grad_cache.txt", plot_dir="/root/autodl-tmp/quantify/plots"):
         if vis_masks is None or cap_masks is None:
             raise ValueError
+            
         if not scale_masks:
             raise ValueError("Scale masks cannot be empty")
         
-        self.scale_masks = [mask.cpu() for mask in scale_masks]
+        self.scale_masks = [mask.cpu() for mask in scale_masks]  # 所有scale的mask列表
+
         self.hooks = []
         self.steps = {}
         self.grad_dict = {}
         self.grad_matrices = {}
 
-        log_dir = os.path.dirname(log_file) or "."
+        # 确保日志文件目录存在
+        log_dir = os.path.dirname(log_file) or "."  # 如果没有目录，默认当前目录
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
 
+        # 确保绘图目录存在
         self.plot_dir = plot_dir
         if not os.path.exists(plot_dir):
             os.makedirs(plot_dir, exist_ok=True)
 
+        # 配置日志，保存到本地 .txt 文件
         logging.basicConfig(
             filename=log_file,
-            filemode='a',
+            filemode='a',  # 'a' 表示追加模式，'w' 表示覆盖
             level=logging.INFO,
             format='%(asctime)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
@@ -91,41 +98,76 @@ class GradCacheHook:
             self.grad_matrices[name] = []
 
         output_grad = out[0]
+        # print(name,output_grad is not None)
         if output_grad is not None:
             output_grad = output_grad.float()
             step = self.steps[name]
 
+            # 获取梯度张量的形状 [B, N, C]
+            grad_shape = list(output_grad.shape)
+            # print("output_grad",output_grad.shape)
+            # print("grad_shape",len(grad_shape))
+            # B, N, C = grad_shape
+
+#             # 计算梯度的平均绝对值
+#             grad_mean = output_grad.abs().mean()
+
+#             # 存储梯度均值
+#             self.grad_dict[name].append(grad_mean.detach().cpu())
+            
+            #scale_reweight_ratio_dict_all
             B, N, C = output_grad.shape
             for batch_idx in range(B):
                 for scale_idx, mask in enumerate(self.scale_masks):
                     if scale_idx not in self.grad_dict[name]:
                         self.grad_dict[name][scale_idx] = []
-                    scale_grad = output_grad[batch_idx][mask.bool()]
-                    grad_mean = scale_grad.abs().mean()
+                    scale_grad = output_grad[batch_idx][mask.bool()]  # 使用当前scale的mask提取梯度
+                    grad_mean = scale_grad.abs().mean()  # 计算平均绝对值
                     self.grad_dict[name][scale_idx].append(grad_mean.detach().cpu())
 
-            grad_matrix = output_grad.abs().mean(dim=0)
+            # 计算批量平均的梯度矩阵 [N, C]
+            grad_matrix = output_grad.abs().mean(dim=0)  # [N, C]
             self.grad_matrices[name].append(grad_matrix.detach().cpu())
 
+            # 使用 logger 记录梯度信息到本地 txt 文件
+            # self.logger.info(f"Step {step} - Layer: {name}")
+            # self.logger.info(f"  Gradient shape: {grad_shape}")
+            # self.logger.info(f"  Gradient mean abs value: {grad_mean.item():.6f}")
+            # self.logger.info(f"  Gradient max abs value: {output_grad.abs().max().item():.6f}")
+            # self.logger.info(f"  Gradient min abs value: {output_grad.abs().min().item():.6f}")
+            # self.logger.info("-" * 50)
+
             self.steps[name] += 1
+
 
     def plot_grad_heatmaps(self):
         for name, matrices in self.grad_matrices.items():
             if not matrices:
                 continue
+          
+            # 跳过 ada_lin 层
             if "ada_lin" in name:
                 self.logger.info(f"Skipping heatmap for layer: {name}")
                 continue
 
-            grad_matrix = torch.stack(matrices).mean(dim=0).numpy()
+            
+            # 取所有步的平均梯度矩阵
+            grad_matrix = torch.stack(matrices).mean(dim=0).numpy()  # [N, C]         
+            
+            # 计算平均绝对梯度（归一化前的）
             avg_abs_grad = np.abs(grad_matrix).mean()
+
+            # 归一化到 [-1, 1]
             grad_max = np.abs(grad_matrix).max()
-            if grad_max > 0:
+            if grad_max > 0:  # 避免除以零
                 grad_matrix_normalized = grad_matrix / grad_max
             else:
-                grad_matrix_normalized = grad_matrix
-            grad_matrix_normalized = grad_matrix_normalized * 1e2
+                grad_matrix_normalized = grad_matrix  # 如果最大值是 0，则保持原样
+            
+            grad_matrix_normalized = grad_matrix_normalized*1e2
 
+
+            # 绘制热图
             plt.figure(figsize=(10, 8))
             ax = sns.heatmap(
                 grad_matrix_normalized,
@@ -138,40 +180,68 @@ class GradCacheHook:
             plt.title(f"Gradients of {name}\nAvg Abs Grad: {avg_abs_grad:.2e}")
             plt.xlabel("Token Index")
             plt.ylabel("Channel Index")
+
+            # 添加色条，使用 ax.figure.colorbar
             cbar = ax.figure.colorbar(ax.collections[0], ax=ax)
             cbar.set_label("Gradient Magnitude (Normalized to [-1, 1])")
+
+            # 保存图像
             plot_path = os.path.join(self.plot_dir, f"grad_heatmap_{name.replace('.', '_')}.png")
             plt.savefig(plot_path)
             plt.close()
             self.logger.info(f"Saved gradient heatmap to {plot_path}")
+            
 
     def register_hooks(self, layers):
         for n, m in layers.named_modules():
             if isinstance(m, nn.Linear) and any([_ in n for _ in ["attn", "ffn"]]):
+                # print(f"Registering hook for layer.{n}")
                 self.hooks.append(
                     m.register_full_backward_hook(
                         functools.partial(self.cache_grad_hook, name=f"layers.{n}")
                     )
                 )
 
+
     def remove_hooks(self):
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
 
+
     def get_grad_dict(self):
         return self.grad_dict
+    
 
     def get_avg_grad_dict(self):
         avg_grad_dict = {}
+
+#         for name, grad_values in self.grad_dict.items():
+# #             mean_vis = torch.mean(torch.stack(grad_values["vis_grad"]))
+# #             mean_cap = torch.mean(torch.stack(grad_values["cap_grad"]))
+
+# #             avg_grad_dict[name] = {
+# #                 "vis_avg_grad": mean_vis.item(),
+# #                 "cap_avg_grad": mean_cap.item()
+# #             }
+#             # grad_values 是每次前向传播的 grad_mean 列表
+#             mean_grad = torch.mean(torch.stack(grad_values))
+#             avg_grad_dict[name] = mean_grad.item()
+
+            
+        #  scale_reweight_ratio_dict_all
+
         for name, scale_grads in self.grad_dict.items():
             avg_grad_dict[name] = {}
             for scale_key, grad_list in scale_grads.items():
                 avg_grad_dict[name][scale_key] = torch.mean(torch.stack(grad_list)).item()
+
         return avg_grad_dict
+    
 
 def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
+
 
 def get_blocks(model):
     if model.__class__.__name__ == "VAR":
@@ -180,11 +250,14 @@ def get_blocks(model):
         raise NotImplementedError(type(model))
     return layers
 
+
 def move_embed(model, device):
     if model.__class__.__name__ == "VAR":
-        pass
+        # model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
+        print(1)
     else:
         raise NotImplementedError(type(model))
+
 
 def process_input(prompt_inputs, prompt_kwargs):
     inputs = {**prompt_inputs, **prompt_kwargs}
@@ -193,7 +266,8 @@ def process_input(prompt_inputs, prompt_kwargs):
     caption_mask = inputs.pop("caption_mask", None)
     patch_nums = inputs.pop("patch_nums", None)
     important_scales = inputs.pop("important_scales", None)
-    scale_masks = inputs.pop("scale_masks", None)
+    scale_masks = inputs.pop("scale_masks",None)
+    
     return inputs, vision_mask, caption_mask, patch_nums, important_scales, scale_masks
 
 class NoInplaceWrapper(nn.Module):
@@ -240,6 +314,32 @@ class NoInplaceWrapper(nn.Module):
                         ffn_out = self.ffn(x_scaled2)                   # FFN 计算
                         ffn_out_scaled = ffn_out * gamma2               # 缩放，非原地
                         x = x + self.drop_path(ffn_out_scaled)          # 残差连接，非原地
+                        
+                        # 初始输入 x
+#                         print(f"x.shape = {x.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 1. 归一化操作
+#                         x_norm2 = self.ln_wo_grad(x)  # LayerNorm (形状不变)
+#                         print(f"x_norm2.shape = {x_norm2.shape}")  # (B, S, D), 同输入
+
+#                         # 2. 缩放和偏移 (scale2/shift2 形状为 (D,))
+#                         print(f"scale2.shape = {scale2.shape}")  # (D,), 例如 (768,)
+#                         print(f"shift2.shape = {shift2.shape}")  # (D,), 例如 (768,)
+#                         x_scaled2 = x_norm2 * (scale2 + 1) + shift2  # 广播到 (B, S, D)
+#                         print(f"x_scaled2.shape = {x_scaled2.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 3. FFN 计算 (假设 FFN 是线性层: D -> 4D -> D)
+#                         ffn_out = self.ffn(x_scaled2)  # 输入输出形状通常相同
+#                         print(f"ffn_out.shape = {ffn_out.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 4. FFN 输出缩放 (gamma2 形状为 (D,))
+#                         print(f"gamma2.shape = {gamma2.shape}")  # (D,), 例如 (768,)
+#                         ffn_out_scaled = ffn_out * gamma2  # 广播到 (B, S, D)
+#                         print(f"ffn_out_scaled.shape = {ffn_out_scaled.shape}")  # (B, S, D), 例如 (32, 128, 768)
+
+#                         # 5. 残差连接 (drop_path 不改变形状)
+#                         x = x + self.drop_path(ffn_out_scaled)  # 形状不变
+#                         print(f"x.shape (after residual) = {x.shape}")  # (B, S, D), 例如 (32, 128, 768)
 
                         return x
                     
@@ -360,6 +460,7 @@ class NoInplaceWrapper(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+
 @torch.no_grad()
 def run_mbq(
     vae_model,
@@ -377,161 +478,209 @@ def run_mbq(
 ):
     device = next(model.parameters()).device
     mbq_results = {"scale": []}
+    # print(prompt_kwargs)
 
     layers = get_blocks(model)
-    if layers is None:
-        raise ValueError("layers is None, please check model.blocks")
+    # print(layers)
 
     inps = []
-    inps_distort = []
     layer_kwargs = {}
 
-    layers[0] = layers[0].to(device)
-    move_embed(model, device)
+    layers[0] = layers[0].cuda()
+    move_embed(model, "cuda")
+
+    # get input and kwargs to layer 0
+    # with_kwargs is only supported in PyTorch 2.0
+    # use this Catcher hack for now
+#     class Catcher(nn.Module):                              #截获第一层输入层的输入，接着生成第一层的输出，实现深拷贝，为ac量化做准备
+#         def __init__(self, module):
+#             super().__init__()
+#             self.module = module
+
+#         def forward(self, **kwargs):
+#             inps.append(inp)
+#             kwargs.append(kwargs)
+#             raise ValueError  # early exit to break later inference
+
+#     # patch layer 0 to catch input and kwargs
+    # layers[0] = Catcher(layers[0])
 
     inputs, vision_mask, caption_mask, patch_nums, important_scales, scale_masks = process_input(prompt_inputs, prompt_kwargs)
     
+    
     label_B = prompt_kwargs["label_B"]
     x_BLCv_wo_first_l = prompt_kwargs["x_BLCv_wo_first_l"]
-    gt_BL = inputs.pop("gt_BL", None)
-    use_cache = inputs.pop("use_cache", None)
+    gt_BL = inputs.pop("gt_BL",None)
+    use_cache = inputs.pop("use_cache",None)
     
-    # 捕获输入
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
+    model=NoInplaceWrapper(model)
+    
+    # print(model)
+    
+    # 设置训练模式
+    model.train()
+    
+    # 使用VAR的训练loss
+    train_loss = nn.CrossEntropyLoss(label_smoothing=0.1, reduction='none')
+    
+    # 分批处理，最大批次大小为8
+    batch_size = 8
+    total_samples = label_B.shape[0]  # 假设label_B的第一维是样本数（1000）
+    num_batches = (total_samples + batch_size - 1) // batch_size  # 计算总批次数
 
-        def forward(self, x, **kwargs):
-            inps.append(x)
-            layer_kwargs.update(kwargs)
-            raise ValueError  # 提前退出
+    # try:
+    #     model(**inputs)
+    # except ValueError: # work with early exit
+    #     pass
 
-    layers[0] = Catcher(layers[0])
+    # model.to_cpu()
+    # layers[0] = layers[0].module  # restore
+    # inps = inps[0]       #截获输入层的最初输入
+    # layer_kwargs["use_cache"] = False
 
-    # 模拟 VAR 的 forward 逻辑，生成初始输入
+    # layers[0] = layers[0].cpu()
+    # move_embed(model, "cpu")
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    mbq_results = {
+        "scale": [],
+    }
+    
+    # 设置训练模式
+    model.train()
+    
+    # 使用VAR的训练loss
+    train_loss = nn.CrossEntropyLoss(label_smoothing=0.1, reduction='none')
+    
+    
+    print("Save gradient...")
+    # save gradient
+    grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask, scale_masks=scale_masks)        
+    grad_cache.register_hooks(layers=layers)
+
+    # 分批计算梯度
+    for batch_idx in tqdm.tqdm(range(num_batches), desc="Computing gradients"):
+        start_idx = batch_idx * batch_size
+        end_idx = min((batch_idx + 1) * batch_size, total_samples)
+        
+        # 提取当前批次的输入
+        label_batch = label_B[start_idx:end_idx].to(device)
+        x_batch = x_BLCv_wo_first_l[start_idx:end_idx].to(device)
+        gt_batch = gt_BL[start_idx:end_idx].to(device) if gt_BL is not None else None
+
+        with torch.enable_grad():
+            logits_BLV = model(label_batch, x_batch)
+            B, V = label_batch.shape[0], vae_model.vocab_size if hasattr(vae_model, 'vae_local') else 4096
+            loss = train_loss(logits_BLV.view(-1, V), gt_batch.view(-1))
+            loss = loss.view(B, -1).sum(dim=-1).mean()
+            loss.backward()
+
+        # 清理显存
+        torch.cuda.empty_cache()
+
+    
+    
+    # 绘制热图并记录日志
+    # grad_cache.plot_grad_heatmaps()
+    
+    grad_avg_dict = grad_cache.get_avg_grad_dict()
+    grad_cache.remove_hooks()
+    del grad_cache
+    
+    # 计算reweight_ratio_dict
+    # reweight_ratio_dict = {}
+    # for name, grads in grad_avg_dict.items():
+    #     # important_grad = grads["important_grad"]
+    #     # less_important_grad = grads["less_important_grad"]
+    #     # ratio = important_grad / (important_grad + less_important_grad + 1e-5)
+    #     # reweight_ratio_dict[name] = ratio
+    #     reweight_ratio_dict[name]=None
+    
+    # 计算 attn 和 mlp 的梯度比率，并保存到 scale_reweight_ratio_dict   scale_masks_here
+    attn_list = []
+    mlp_list = []
+    scale_reweight_ratio_dict_all = {}  # 保存所有层的比率
+
+    for name, grads in grad_avg_dict.items():
+        # 计算当前层所有 patch 的平均梯度
+        all_patch_avg_grad = np.mean(list(grads.values())) if grads else 0.0
+        
+        scale_reweight_ratio_dict_all[name] = {}
+        for scale_key, grad in grads.items():
+            # 当前 patch 梯度与所有 patch 平均值的比率
+            ratio = grad / (all_patch_avg_grad + 1e-6)
+            scale_reweight_ratio_dict_all[name][scale_key] = ratio
+            
+            # 根据层类型添加到 attn_list 或 mlp_list
+            if "attn" in name or "proj" in name:
+                attn_list.append(ratio)
+            elif "ffn" in name or "fc1" in name or "fc2" in name:
+                mlp_list.append(ratio)
+                
+                
+    # 计算中位数
+    attn_median = np.median(attn_list) if attn_list else 1.0
+    mlp_median = np.median(mlp_list) if mlp_list else 1.0
+        
+    # 模拟 VAR 的 forward 逻辑，生成 x_BLC, cond_BD, 和 attn_bias
     B = x_BLCv_wo_first_l.shape[0]
     with torch.cuda.amp.autocast(enabled=False):
-        label_B = torch.where(torch.rand(B, device=label_B.device) < model.cond_drop_rate,
-                              model.num_classes, label_B)
-        cond_BD = model.class_emb(label_B)
+        label_B = torch.where(torch.rand(B, device=label_B.device) < model.model.cond_drop_rate,
+                              model.model.num_classes, label_B)
+        cond_BD = model.model.class_emb(label_B)
         sos = cond_BD
-        sos = sos.unsqueeze(1).expand(B, model.first_l, -1) + model.pos_start.expand(B, model.first_l, -1)
+        sos = sos.unsqueeze(1).expand(B, model.model.first_l, -1) + model.model.pos_start.expand(B, model.model.first_l, -1)
 
-        if model.prog_si == 0:
+        if model.model.prog_si == 0:
             x_BLC = sos
         else:
-            x_BLC = torch.cat((sos, model.word_embed(x_BLCv_wo_first_l.float())), dim=1)
+            x_BLC = torch.cat((sos, model.model.word_embed(x_BLCv_wo_first_l.float())), dim=1)
 
-        ed = model.begin_ends[model.prog_si][1] if model.prog_si >= 0 else model.L
-        x_BLC += model.lvl_embed(model.lvl_1L[:, :ed].expand(B, -1)) + model.pos_1LC[:, :ed]
+        ed = model.model.begin_ends[model.model.prog_si][1] if model.model.prog_si >= 0 else model.model.L
+        x_BLC += model.model.lvl_embed(model.model.lvl_1L[:, :ed].expand(B, -1)) + model.model.pos_1LC[:, :ed]
 
-    attn_bias = model.attn_bias_for_masking[:, :, :ed, :ed]
-    cond_BD_or_gss = model.shared_ada_lin(cond_BD)
+    attn_bias = model.model.attn_bias_for_masking[:, :, :ed, :ed]
+    cond_BD_or_gss = model.model.shared_ada_lin(cond_BD)
 
     temp = x_BLC.new_ones(8, 8)
     main_type = torch.matmul(temp, temp).dtype
 
-    inps_input = x_BLC.to(dtype=main_type).to(device)
-    cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type).to(device)
-    attn_bias = attn_bias.to(dtype=main_type).to(device)
+    inps = x_BLC.to(dtype=main_type)
+    cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type)
+    attn_bias = attn_bias.to(dtype=main_type)
 
     layer_kwargs = {
         "cond_BD": cond_BD_or_gss,
         "attn_bias": attn_bias,
     }
+    
+    
+    # 创建module_kwargs
+    module_kwargs = {
+        "model": model,
+        "input_feat": x_BLCv_wo_first_l,
+    }
+    
+    # 准备输入
+    inps = inps[0].cuda()  # 捕获的输入移到 CPU
 
-    try:
-        layers[0](inps_input, **layer_kwargs)
-    except ValueError:
-        pass
-
-    layers[0] = layers[0].module  # 恢复原始层
-    inps = inps[0]
-
-    # 创建初始 inps_distort
-    if distort:
-        print("Use distort input...")
-        inps_distort = copy.deepcopy(inps)
-        # print(inps_distort)
-
-    gc.collect()
+    
     torch.cuda.empty_cache()
-
-    # 包装模型以避免原地操作
-    model = NoInplaceWrapper(model)
-
-    # 梯度计算
-    model.train()
-    train_loss = nn.CrossEntropyLoss(label_smoothing=0.1, reduction='none')
-    batch_size = 8
-    total_samples = label_B.shape[0]
-    num_batches = (total_samples + batch_size - 1) // batch_size
-
-    if reweight:
-        print("Save gradient...")
-        grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask, scale_masks=scale_masks)
-        grad_cache.register_hooks(layers=layers)
-
-        for batch_idx in tqdm.tqdm(range(num_batches), desc="Computing gradients"):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_samples)
-            label_batch = label_B[start_idx:end_idx].to(device)
-            x_batch = x_BLCv_wo_first_l[start_idx:end_idx].to(device)
-            gt_batch = gt_BL[start_idx:end_idx].to(device) if gt_BL is not None else None
-
-            with torch.enable_grad():
-                logits_BLV = model(label_batch, x_batch)
-                B, V = label_batch.shape[0], vae_model.vocab_size if hasattr(vae_model, 'vae_local') else 4096
-                loss = train_loss(logits_BLV.view(-1, V), gt_batch.view(-1))
-                loss = loss.view(B, -1).sum(dim=-1).mean()
-                loss.backward()
-
-            torch.cuda.empty_cache()
-
-        grad_avg_dict = grad_cache.get_avg_grad_dict()
-        grad_cache.remove_hooks()
-        del grad_cache
-
-        # 计算 reweight_ratio_dict
-        attn_list = []
-        mlp_list = []
-        scale_reweight_ratio_dict_all = {}
-
-        for name, grads in grad_avg_dict.items():
-            all_patch_avg_grad = np.mean(list(grads.values())) if grads else 0.0
-            scale_reweight_ratio_dict_all[name] = {}
-            for scale_key, grad in grads.items():
-                ratio = grad / (all_patch_avg_grad + 1e-6)
-                scale_reweight_ratio_dict_all[name][scale_key] = ratio
-                if "attn" in name or "proj" in name:
-                    attn_list.append(ratio)
-                elif "ffn" in name or "fc1" in name or "fc2" in name:
-                    mlp_list.append(ratio)
-
-        attn_median = np.median(attn_list) if attn_list else 1.0
-        mlp_median = np.median(mlp_list) if mlp_list else 1.0
-    else:
-        scale_reweight_ratio_dict_all = {}
-        attn_median = 1.0
-        mlp_median = 1.0
-
-    gc.collect()
-    torch.cuda.empty_cache()
-
+    
+    # solve layer by layer
     # 逐层处理
     for i in tqdm.tqdm(range(len(layers)), desc="Running MBQ..."):
-        if i%2==1:
-            continue
-        
         layer = layers[i]
         layer = layer.to(device)
         named_linears = get_named_linears(layer)
 
+        # 首先，获取所有线性层的输入特征
         def cache_input_hook(m, x, y, name, feat_dict):
             x = x[0]
             x = x.detach()
-            feat_dict[name].append(x.to(device))
+            feat_dict[name].append(x.to("cuda"))
 
         input_feat = defaultdict(list)
         handles = []
@@ -541,139 +690,115 @@ def run_mbq(
                     functools.partial(cache_input_hook, name=name, feat_dict=input_feat)
                 )
             )
-
+        
+        # inps = inps.to(next(layer.parameters()).device)  # 支持多 GPU
+        # 获取输出作为下一层的输入
         for k in layer_kwargs:
             if isinstance(layer_kwargs[k], torch.Tensor):
-                layer_kwargs[k] = layer_kwargs[k].to(device)
+                layer_kwargs[k] = layer_kwargs[k].to(next(layer.parameters()).device)
 
         inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
-
-        input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
         
-        # print(f"Layer {i} input_feat keys: {list(input_feat.keys())}")
+        # 合并输入特征
+        input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
 
+        # 清除 GPU 内存
         torch.cuda.empty_cache()
 
-        ans_mask = None
+        # 直接使用传入的 reweight_ratio_dict，无需重新计算
+        ans_mask = None  # 移除 reweight 逻辑，设置为 None
         vis_mask = None
+        
+        # 简化 reweight_ratio_dict 赋值，使用 scale_masks_here 的数量
         reweight_ratio_dict = {}
-        num_patches = len(scale_masks) if scale_masks else 0
+        num_patches = len(scale_masks)  # 通过 scale_masks 的第一维度判断 patch 个数
         for name in named_linears:
             reweight_ratio_dict[name] = {}
             layer_idx_str = str(i)
+            # 遍历 scale_reweight_ratio_dict_all，查找当前层
             for full_name, scale_dict in scale_reweight_ratio_dict_all.items():
                 name_parts = full_name.split(".")
-                if layer_idx_str in name_parts:
+                if layer_idx_str in name_parts:  # 检查是否为当前层
                     for scale_idx in range(num_patches):
-                        ratio = scale_dict.get(scale_idx, 1.0)
+                        ratio = scale_dict.get(scale_idx, 1.0)  # 默认值为 1.0
                         if "attn" in name_parts or "proj" in name_parts:
-                            if name in ["attn.mat_qkv", "attn.proj"]:
+                            if name in ["attn.mat_qkv", "attn.proj"]:  # 只处理当前层的 attn 相关线性层
                                 reweight_ratio_dict[name][scale_idx] = max(ratio, attn_median)
                         elif "ffn" in name_parts or "fc1" in name_parts or "fc2" in name_parts:
-                            if name in ["ffn.fc1", "ffn.fc2"]:
+                            if name in ["ffn.fc1", "ffn.fc2"]:  # 只处理当前层的 ffn 相关线性层
                                 reweight_ratio_dict[name][scale_idx] = max(ratio, mlp_median)
+                
 
         # 执行量化
-        if auto_scale:
-            if wa_quant:
-                if distort:
-                    scales_list = auto_scale_block_wa_distort(
-                        layer,
-                        layer_kwargs,
-                        w_bit=w_bit,
-                        a_bit=a_bit,
-                        q_config=q_config,
-                        input_feat=input_feat,
-                        ans_mask=ans_mask,
-                        vis_mask=vis_mask,
-                        reweight_ratio_dict=reweight_ratio_dict,
-                        q_input=inps_distort,
-                        loss_mode=loss_mode
-                    )
-                else:
-                    scales_list = auto_scale_block_wa(
-                        layer,
-                        layer_kwargs,
-                        w_bit=w_bit,
-                        a_bit=a_bit,
-                        q_config=q_config,
-                        input_feat=input_feat,
-                        ans_mask=ans_mask,
-                        vis_mask=vis_mask,
-                        reweight_ratio_dict=reweight_ratio_dict,
-                        loss_mode=loss_mode
-                    )
-            else:
-                if distort:
-                    # print("auto_scale_block_distort")
-                    scales_list = auto_scale_block_distort(
-                        layer,
-                        layer_kwargs,
-                        w_bit=w_bit,
-                        q_config=q_config,
-                        input_feat=input_feat,
-                        ans_mask=ans_mask,
-                        vis_mask=vis_mask,
-                        reweight_ratio_dict=reweight_ratio_dict,
-                        q_input=inps_distort,
-                        loss_mode=loss_mode
-                    )
-                else:
-                    scales_list = auto_scale_block(
-                        layer,
-                        layer_kwargs,
-                        w_bit=w_bit,
-                        q_config=q_config,
-                        input_feat=input_feat,
-                        ans_mask=ans_mask,
-                        vis_mask=vis_mask,
-                        reweight_ratio_dict=reweight_ratio_dict,
-                        loss_mode=loss_mode
-                    )
+        if wa_quant:  # wa_quant 默认设为 True
+            scales_list = auto_scale_block_wa(
+                layer,
+                layer_kwargs,
+                w_bit=w_bit,
+                a_bit=a_bit,
+                q_config=q_config,
+                input_feat=input_feat,
+                ans_mask=None,
+                vis_mask=None,
+                reweight_ratio_dict=reweight_ratio_dict,
+                loss_mode=loss_mode
+            )
+        else:
+           scales_list = auto_scale_block(
+                layer,
+                layer_kwargs,
+                w_bit=w_bit,
+                q_config=q_config,
+                input_feat=input_feat,
+                ans_mask=ans_mask,
+                vis_mask=vis_mask,
+                reweight_ratio_dict=reweight_ratio_dict,
+                loss_mode=loss_mode,
+                scale_masks=scale_masks  # 添加 scale_masks 参数
+            )
+        
+        # 应用缩放
+        apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
 
-            apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
+#         # 量化线性层
+#         layer_q = copy.deepcopy(layer)
+#         layer_q = layer_q.cuda()
+#         named_linears_q = get_named_linears(layer_q)
+#         for n, m in named_linears_q.items():
+#             new_linear = WALinear.from_float(m, weight_quant="per_channel", act_quant="per_token", w_bit=w_bit, a_bit=a_bit)
+#             father_module = get_module_by_name_suffix(layer_q, '.'.join(n.split(".")[:-1]))
+#             setattr(father_module, n.split('.')[-1], new_linear)
+#             del new_linear, m
+#             torch.cuda.empty_cache()
+        
+#         # 更新输入
+#         inps = inps.to(next(layer_q.parameters()).device)
+#         inps = layer_q(inps, **layer_kwargs)[0]
+#         del layer_q
+#         torch.cuda.empty_cache()
 
-        if distort:
-            # get distort output as next layer's input
-            if wa_quant:
-                layer_q = copy.deepcopy(layer)
-                layer_q = layer_q.cuda()
-                named_linears_q = get_named_linears(layer_q)
-                for n, m in named_linears_q.items():
-                    new_linear = WALinear.from_float(m, weight_quant="per_channel", act_quant="per_token", w_bit=w_bit, a_bit=a_bit)
-                    father_module = get_module_by_name_suffix(layer_q, '.'.join(n.split(".")[:-1]))
-                    setattr(father_module, n.split('.')[-1], new_linear)
-                    del new_linear, m
-                    torch.cuda.empty_cache()
+        # 将输入移回 CPU
+        inps = inps.cuda()
+        for k in layer_kwargs:
+            if isinstance(layer_kwargs[k], torch.Tensor):
+                layer_kwargs[k] = layer_kwargs[k].cuda()
 
-                inps_distort = inps_distort.to(next(layer_q.parameters()).device)  # in case multi-gpu
-                inps_distort = layer_q(inps_distort, **layer_kwargs)[0]
-                del layer_q 
-            else:
-                layer_q = copy.deepcopy(layer)
-                layer_q = layer_q.cuda()
-                named_linears_q = get_named_linears(layer_q)
-                for n, m in named_linears_q.items():
-                    m.weight.data = pseudo_quantize_tensor(m.weight.data, n_bits=w_bit, **q_config)
-                    torch.cuda.empty_cache()
+        # 将当前层移回 CPU
+        layers[i] = layers[i].cuda()
 
-                inps_distort = inps_distort.to(next(layer_q.parameters()).device)  # in case multi-gpu
-                inps_distort = layer_q(inps_distort, **layer_kwargs)[0]
-                del layer_q 
+        # 清除 GPU 内存
+        torch.cuda.empty_cache()
 
-        # append prefix to make names global
+        # 添加前缀，使名称全局化
         mbq_results["scale"] += append_str_prefix(
             scales_list, get_op_name(model.model, layer) + "."
         )
 
-        # 清理内存
-        del input_feat
-        gc.collect()
-        torch.cuda.empty_cache()
 
     return mbq_results
+
 
 def apply_mbq(model, mbq_results):
     apply_scale(model, mbq_results["scale"])

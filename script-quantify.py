@@ -159,86 +159,86 @@ def var_mbq_entry(
         torch.save(mbq_results, scale_path)
         print(f"MBQ results saved at {scale_path}")
         
-    print(model)
+    # print(model)
 
     if pseudo_quant:
         mbq_results = torch.load(scale_path, map_location="cuda")
         apply_mbq(model, mbq_results)
         
-        original_state_dict = copy.deepcopy(model.state_dict())
+        # original_state_dict = copy.deepcopy(model.state_dict())
 
         if not wa_quant:
             pseudo_quantize_model_weight(model, w_bit=w_bit, q_config=q_config)
         else:
             pseudo_quantize_model_weight_act(model, w_bit=w_bit, a_bit=a_bit)
     
-        # 获取量化后的模型权重
-        quantized_state_dict = model.state_dict()
+#         # 获取量化后的模型权重
+#         quantized_state_dict = model.state_dict()
 
-        # 计算每层的MSE
-        # 计算每层的误差指标并保存到文件
-        with open("/root/autodl-tmp/quantify/mse_results.txt", "a") as f:
-            print("\n=== Error Comparison of Parameters Before and After Quantization ===")
-            f.write("\n=== Error Comparison of Parameters Before and After Quantization ===\n")
+#         # 计算每层的MSE
+#         # 计算每层的误差指标并保存到文件
+#         with open("/root/autodl-tmp/quantify/mse_results.txt", "a") as f:
+#             print("\n=== Error Comparison of Parameters Before and After Quantization ===")
+#             f.write("\n=== Error Comparison of Parameters Before and After Quantization ===\n")
 
-            total_mse = 0.0
-            total_mae = 0.0
-            total_max_error = 0.0
-            total_relative_error = 0.0
-            param_count = 0
+#             total_mse = 0.0
+#             total_mae = 0.0
+#             total_max_error = 0.0
+#             total_relative_error = 0.0
+#             param_count = 0
 
-            for key in original_state_dict:
-                if 'weight' in key:  # 只比较权重参数
-                    orig_weight = original_state_dict[key]
-                    quant_weight = quantized_state_dict[key]
+#             for key in original_state_dict:
+#                 if 'weight' in key:  # 只比较权重参数
+#                     orig_weight = original_state_dict[key]
+#                     quant_weight = quantized_state_dict[key]
 
-                    # 计算各指标
-                    mse = compute_mse(orig_weight, quant_weight)
-                    mae = compute_mae(orig_weight, quant_weight)
-                    max_error = compute_max_error(orig_weight, quant_weight)
-                    rel_error = compute_relative_error(orig_weight, quant_weight)
+#                     # 计算各指标
+#                     mse = compute_mse(orig_weight, quant_weight)
+#                     mae = compute_mae(orig_weight, quant_weight)
+#                     max_error = compute_max_error(orig_weight, quant_weight)
+#                     rel_error = compute_relative_error(orig_weight, quant_weight)
 
-                    # 累加总和
-                    total_mse += mse
-                    total_mae += mae
-                    total_max_error += max_error
-                    total_relative_error += rel_error
-                    param_count += 1
+#                     # 累加总和
+#                     total_mse += mse
+#                     total_mae += mae
+#                     total_max_error += max_error
+#                     total_relative_error += rel_error
+#                     param_count += 1
 
-                    # 打印和写入文件
-                    # print(f"Layer '{key}':")
-                    # print(f"  MSE: {mse:.6f}")
-                    # print(f"  MAE: {mae:.6f}")
-                    # print(f"  Max Absolute Error: {max_error:.6f}")
-                    # print(f"  Relative Error: {rel_error:.6f}")
+#                     # 打印和写入文件
+#                     # print(f"Layer '{key}':")
+#                     # print(f"  MSE: {mse:.6f}")
+#                     # print(f"  MAE: {mae:.6f}")
+#                     # print(f"  Max Absolute Error: {max_error:.6f}")
+#                     # print(f"  Relative Error: {rel_error:.6f}")
 
-                    f.write(f"Layer '{key}': ")
-                    f.write(f"  MSE: {mse:.6f} ")
-                    f.write(f"  MAE: {mae:.6f} ")
-                    f.write(f"  Max Absolute Error: {max_error:.6f} ")
-                    f.write(f"  Relative Error: {rel_error:.6f}\n")
+#                     f.write(f"Layer '{key}': ")
+#                     f.write(f"  MSE: {mse:.6f} ")
+#                     f.write(f"  MAE: {mae:.6f} ")
+#                     f.write(f"  Max Absolute Error: {max_error:.6f} ")
+#                     f.write(f"  Relative Error: {rel_error:.6f}\n")
 
-            # 计算平均值
-            if param_count > 0:
-                avg_mse = total_mse / param_count
-                avg_mae = total_mae / param_count
-                avg_max_error = total_max_error / param_count
-                avg_relative_error = total_relative_error / param_count
+#             # 计算平均值
+#             if param_count > 0:
+#                 avg_mse = total_mse / param_count
+#                 avg_mae = total_mae / param_count
+#                 avg_max_error = total_max_error / param_count
+#                 avg_relative_error = total_relative_error / param_count
 
-                print(f"\nAverage across all weight layers:")
-                print(f"  MSE: {avg_mse:.6f}")
-                print(f"  MAE: {avg_mae:.6f}")
-                print(f"  Max Absolute Error: {avg_max_error:.6f}")
-                print(f"  Relative Error: {avg_relative_error:.6f}")
+#                 print(f"\nAverage across all weight layers:")
+#                 print(f"  MSE: {avg_mse:.6f}")
+#                 print(f"  MAE: {avg_mae:.6f}")
+#                 print(f"  Max Absolute Error: {avg_max_error:.6f}")
+#                 print(f"  Relative Error: {avg_relative_error:.6f}")
 
-                f.write(f"\nAverage across all weight layers: ")
-                f.write(f"  MSE: {avg_mse:.6f} ")
-                f.write(f"  MAE: {avg_mae:.6f} ")
-                f.write(f"  Max Absolute Error: {avg_max_error:.6f} ")
-                f.write(f"  Relative Error: {avg_relative_error:.6f}\n")
-            else:
-                print("No weight parameters found to compare.")
-                f.write("No weight parameters found to compare.\n")
+#                 f.write(f"\nAverage across all weight layers: ")
+#                 f.write(f"  MSE: {avg_mse:.6f} ")
+#                 f.write(f"  MAE: {avg_mae:.6f} ")
+#                 f.write(f"  Max Absolute Error: {avg_max_error:.6f} ")
+#                 f.write(f"  Relative Error: {avg_relative_error:.6f}\n")
+#             else:
+#                 print("No weight parameters found to compare.")
+#                 f.write("No weight parameters found to compare.\n")
 
     return model
 
@@ -248,17 +248,18 @@ if __name__ == "__main__":
     parser.add_argument("--vae_ckpt", type=str, default='/root/autodl-tmp/pretrained_models/vae_ch160v4096z32.pth')
     parser.add_argument("--depth", type=int, default=30)
     parser.add_argument("--cfg", type=float, default=1.5)
-    parser.add_argument("--scale_path", type=str, default="/root/autodl-tmp/quantify/var_mbq_scales_w_16.pt")
+    parser.add_argument("--scale_path", type=str, default="/root/autodl-tmp/quantify/var_mbq_scales_16.pt")
     parser.add_argument("--w_bit", type=int, default=4)
-    parser.add_argument("--a_bit", type=int, default=4)
+    parser.add_argument("--a_bit", type=int, default=6)
     parser.add_argument("--important_scales", type=int, default=3)
     parser.add_argument('--output_dir', type=str, required=False, help="Output directory to save images",default="/root/autodl-tmp/outputs")
     parser.add_argument('--num_images', type=int, required=False, help="Number of images to generate",default=50000)
     parser.add_argument('--num_iter', type=int, required=False, help="Batch size per iteration",default=64)
-    parser.add_argument('--wa_quant', type=bool, required=False, help="Batch size per iteration",default=False)
+    parser.add_argument('--wa_quant', type=bool, required=False, help="Batch size per iteration",default=True)
     args = parser.parse_args()
     
 
+    print("Quantify-256-w_bit{}-a_bit{}-image{}-wa_quant {}".format(args.w_bit,args.a_bit,args.num_images,args.wa_quant))
     # 设置随机种子
     seed = 1
     torch.manual_seed(seed)
@@ -292,7 +293,7 @@ if __name__ == "__main__":
     var.train()
 
     # 准备示例输入用于量化
-    B = 50  # 小批量用于量化
+    B = 250  # 小批量用于量化
     batch_size = 1000//B 
     
     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
@@ -408,7 +409,7 @@ if __name__ == "__main__":
         "scale_masks": scale_masks  # 传入所有mask的列表
     }
 
-    # 进行MBQ量化
+     # 计算 MBQ
     quantized_var = var_mbq_entry(
         vae_model=vae,
         model=var,
@@ -416,6 +417,40 @@ if __name__ == "__main__":
         prompt_inputs=prompt_inputs,
         run_mbq_process=True,
         pseudo_quant=False,
+        scale_path=args.scale_path,
+        w_bit=args.w_bit,
+        a_bit=args.a_bit,
+        wa_quant=args.wa_quant,
+        important_scales=args.important_scales,
+        reweight=True,
+        patch_nums=patch_nums,
+        distort=False
+    )
+
+    # 第2步：删除模型并释放内存
+    print("Step 2: Deleting models and clearing memory...")
+    del vae, var, quantized_var
+    torch.cuda.empty_cache()
+
+    # 第3步：重新加载模型并应用伪量化
+    print("Step 3: Reloading models and applying pseudo quantization...")
+    vae, var = build_vae_var(
+        V=4096, Cvae=32, ch=160, share_quant_resi=4,
+        device=device, patch_nums=patch_nums,
+        num_classes=1000, depth=args.depth, shared_aln=False,
+    )
+    vae.load_state_dict(torch.load(args.vae_ckpt, map_location='cuda'), strict=True)
+    var.load_state_dict(torch.load(args.ckpt_path, map_location='cuda'), strict=True)
+    vae.eval()
+    var.train()
+
+    quantized_var = var_mbq_entry(
+        vae_model=vae,
+        model=var,
+        inputs=prompt_kwargs,
+        prompt_inputs=prompt_inputs,
+        run_mbq_process=False,  # 使用已保存的 MBQ 结果
+        pseudo_quant=True,     # 应用伪量化
         scale_path=args.scale_path,
         w_bit=args.w_bit,
         a_bit=args.a_bit,
@@ -441,7 +476,7 @@ if __name__ == "__main__":
     num_sampling_steps = 250
     more_smooth = False
     
-    save_folder = os.path.join(output_dir, "w_quantify-256-ariter{}-diffsteps{}-cfg{}-image{}".format(num_iter, num_sampling_steps, cfg, num_images))
+    save_folder = os.path.join(output_dir, "Quantify-256-w_bit{}-a_bit{}-image{}-wa_quant{}".format(args.w_bit,args.a_bit,num_images,args.wa_quant))
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     num_steps = num_images // batch_size + 1

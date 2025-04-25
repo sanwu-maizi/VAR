@@ -1,13 +1,14 @@
 import gc
 import torch
+import functools
 import torch.nn as nn
 
 from transformers.models.bloom.modeling_bloom import BloomBlock, BloomGelu
 from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
 from transformers.activations import GELUActivation
-
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
+
 
 from models.basic_var import AdaLNSelfAttn
 
@@ -15,10 +16,12 @@ from .qmodule import ScaledActivation, IdentityScaleLayer, ScaledDynamicFC
 from qmllm.utils.search import get_op_by_name, get_op_name, set_op_by_name
 from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
 
-__all__ = ["auto_scale_block", "apply_scale"]
+from collections import defaultdict
+
+__all__ = ["auto_scale_block_distort", "apply_scale"]
 
 @torch.no_grad()
-def get_weight_scale(weight, q_group_size=-1):   #计算权重的缩放因子
+def get_weight_scale(weight, q_group_size=-1):
     org_shape = weight.shape
     if q_group_size > 0:
         weight = weight.view(-1, q_group_size)
@@ -27,27 +30,18 @@ def get_weight_scale(weight, q_group_size=-1):   #计算权重的缩放因子
     scale = scale.mean(0)
     return scale
 
-
 @torch.no_grad()
-def get_act_scale(x):            #计算激活值的缩放因子
+def get_act_scale(x):
     return x.abs().view(-1, x.shape[-1]).mean(0)
-
 
 @torch.no_grad()
 def scale_ln_fcs(ln, fcs, scales):
     if not isinstance(fcs, list):
         fcs = [fcs]
 
-    # scales = scales.to(ln.weight.device)
-
-    # 检查 ln 是否有参数（elementwise_affine=False 时没有参数）
     ln_has_params = hasattr(ln, "weight") and ln.weight is not None
-    if ln_has_params:  # 如果 ln 有参数
-        ln.weight.div_(scales)  
-        if hasattr(ln, "bias") and ln.bias is not None:
-            ln.bias.div_(scales)
-            
-#     ln.weight.div_(scales)
+    if ln_has_params:
+        ln.weight.div_(scales)
     if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales)
 
@@ -60,17 +54,12 @@ def scale_ln_fcs(ln, fcs, scales):
         for p in fc.parameters():
             assert torch.isnan(p).sum() == 0
 
-
 @torch.no_grad()
 def scale_fc_fc(fc1, fc2, scales):
     assert isinstance(fc1, nn.Linear)
     assert isinstance(fc2, nn.Linear)
-    # assert fc1.out_features == fc2.in_features
 
-    # scales = scales.to(fc1.weight.device)
-
-    # fc1.weight.div_(scales.view(-1, 1))
-    fc1.weight[-scales.size(0) :].div_(scales.view(-1, 1))
+    fc1.weight[-scales.size(0):].div_(scales.view(-1, 1))
     if fc1.bias is not None:
         fc1.bias.div_(scales.view(-1))
 
@@ -80,7 +69,6 @@ def scale_fc_fc(fc1, fc2, scales):
         assert torch.isnan(p).sum() == 0
     for p in fc2.parameters():
         assert torch.isnan(p).sum() == 0
-
 
 @torch.no_grad()
 def scale_gelu_fc(gelu, fc, scales):
@@ -92,39 +80,33 @@ def scale_gelu_fc(gelu, fc, scales):
     for p in fc.parameters():
         assert torch.isnan(p).sum() == 0
 
-
 @torch.no_grad()
-def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, loss_mode="mae", scale_masks=None):
-
-    # firstly, get the weight quantize function
+def auto_scale_block_distort(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, q_input, loss_mode="mae", scale_masks=None):
+    # Weight quantization function
     if w_bit is not None:
-
         def w_quantize_func(p):
             return pseudo_quantize_tensor(
                 p,
                 n_bits=w_bit,
                 **q_config,
             ).detach()
-
     else:
-
         def w_quantize_func(p):
             return p
 
     if "use_cache" in module_kwargs:
         module_kwargs.pop("use_cache")
 
-    # find the best scale ratio
-    def _search_module_scale(block, linears2scale: list, x, reweight_ratio=None, kwargs={}):
-        # w: co, ci
-        # x: n, ci
+    # Find the best scale ratio
+    def _search_module_scale_distort(block, linears2scale: list, x, x_q, reweight_ratio=None, kwargs={}):
         x = x.to(next(block.parameters()).device)
+        x_q = x_q.to(next(block.parameters()).device)
         with torch.no_grad():
             org_out = block(x, **kwargs)
             if isinstance(org_out, tuple):
                 org_out = org_out[0]
 
-        x_max = get_act_scale(x)
+        x_max = get_act_scale(x_q)
 
         best_error = float("inf")
         best_ratio = -1
@@ -141,51 +123,26 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             for fc in linears2scale:
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
                 fc.weight.data = w_quantize_func(fc.weight.data) / (scales.view(1, -1))
-            out = block(x, **kwargs)
+            out = block(x_q, **kwargs)
             if isinstance(out, tuple):
                 out = out[0]
 
-            # loss = (
-            #     (org_out - out).float().pow(2).mean().item()
-            # )  # float prevents overflow
-
-            # if loss_mode == "mse":
-            #     if ans_mask is not None and vis_mask is not None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-            #         masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
-            #         masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
-            #         if reweight_ratio is not None:
-            #             loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
-            #         else:
-            #             loss = (
-            #                 (org_out - out).float().pow(2).mean().item()
-            #             ) 
-            #     elif ans_mask is not None and vis_mask is None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
-            #         loss = masked_diff.sum() / ans_mask_expand.sum() 
-            #     else:
-            #         loss = (
-            #             (org_out - out).float().pow(2).mean().item()
-            #         )  # float prevents overflow
             if loss_mode == "mse":
                 loss = 0.0
-                if reweight_ratio is not None:  # reweight_ratio 是二维字典，例如 {"attn": {0: 1.5, 1: 1.2, ...}}
+                if reweight_ratio is not None and scale_masks is not None:
                     for scale_idx, scale_mask in enumerate(scale_masks):
                         scale_mask_expand = scale_mask.unsqueeze(-1).expand_as(out).to(out.device)
                         masked_diff = ((org_out - out).float().pow(2) * scale_mask_expand)
                         scale_loss = masked_diff.sum() / scale_mask_expand.sum()
-                        # 从 reweight_ratio 中获取当前层的对应 scale_idx 的权重
                         if scale_idx in reweight_ratio:
                             loss += reweight_ratio[scale_idx] * scale_loss
                         else:
-                            loss += scale_loss  # 如果没有指定权重，默认权重为 1
+                            loss += scale_loss
                 else:
                     loss = (org_out - out).float().pow(2).mean().item()
             elif loss_mode == "mae":
                 loss = 0.0
-                if reweight_ratio is not None:  # reweight_ratio 是二维字典，例如 {"attn": {0: 1.5, 1: 1.2, ...}}
+                if reweight_ratio is not None and scale_masks is not None:
                     for scale_idx, scale_mask in enumerate(scale_masks):
                         scale_mask_expand = scale_mask.unsqueeze(-1).expand_as(out).to(out.device)
                         masked_diff = ((org_out - out).float().abs() * scale_mask_expand)
@@ -193,7 +150,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
                         if scale_idx in reweight_ratio:
                             loss += reweight_ratio[scale_idx] * scale_loss
                         else:
-                            loss += scale_loss  # 如果没有指定权重，默认权重为 1
+                            loss += scale_loss
                 else:
                     loss = (org_out - out).float().abs().mean().item()
 
@@ -207,86 +164,158 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         if best_ratio == -1:
             print(history)
             raise Exception
-        # print(best_ratio)
         best_scales = best_scales.view(-1)
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
-        
-        #mark
-        return best_scales.detach(), best_error
+        return best_scales.detach()
 
-    def _auto_get_scale(prev_op, layers, inp, reweight_ratio=None, module2inspect=None, kwargs={}):
-        # module2inspect: if given, we will check the output diff of this module instead of layers
+    def _auto_get_scale_distort(prev_op, layers, inp, inp_q, reweight_ratio=None, module2inspect=None, kwargs={}):
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
-            
-        #mark
 
-        scales,loss = _search_module_scale(module2inspect, layers, inp, reweight_ratio, kwargs)
+        scales = _search_module_scale_distort(module2inspect, layers, inp, inp_q, reweight_ratio, kwargs)
         scales = scales.detach().cpu()
-        
-        # if prev_op==module.ffn.act:
-            # print(scales,loss)
-        # prev_op_name, [layer_name], scale
         return (
             get_op_name(module, prev_op),
             tuple([get_op_name(module, m) for m in layers]),
             scales,
         )
 
-    scales_list = []  # return the searched scales
-    
-    if isinstance(module, AdaLNSelfAttn):  # 假设 AdaLNSelfAttn 是你的自定义类
-        # attention input: quantize mat_qkv
-        # scales_list.append(
-        #     _auto_get_scale_wa(
-        #         prev_op=module.ln_wo_grad,  # 假设 ln_wo_grad 是前置归一化层
-        #         layers=[module.attn.mat_qkv],
-        #         layers_name=["mat_qkv"],
-        #         inp=input_feat["attn.mat_qkv"],
-        #         reweight_ratio=reweight_ratio_dict.get("attn", None),
-        #         module2inspect=module.attn,
-        #         kwargs=module_kwargs,
-        #     )
-        # )
+    scales_list = []
 
-        # attn out: quantize proj
+    def _auto_get_input_feat_distort(inps_q, scales_list=None):
+        # 保存原始状态字典
+        org_sd = {k: v.cuda() for k, v in module.state_dict().items()}
+
+        # 获取所有 nn.Linear 模块
+        named_linears = {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
+
+        # 记录被替换为 ScaledDynamicFC 的模块
+        modified_modules = {}
+
+        if scales_list is not None:
+            # 保存替换前的 nn.Linear 模块
+            for name, layer in module.named_modules():
+                if isinstance(layer, ScaledDynamicFC):
+                    modified_modules[name] = layer
+                    print("ScaledDynamicFC1")
+                    # 恢复原始 nn.Linear
+                    set_op_by_name(module, name, layer.fc)
+
+            # 应用缩放，可能会将 nn.Linear 替换为 ScaledDynamicFC
+            apply_scale(module, scales_list)
+            module.cuda()
+
+            # 重新获取 named_linears，因为模块结构可能已改变
+            named_linears = {name: m for name, m in module.named_modules() if isinstance(m, (nn.Linear, ScaledDynamicFC))}
+            for name in named_linears:
+                if isinstance(named_linears[name], ScaledDynamicFC):
+                    print("ScaledDynamicFC2")
+                    # 记录新替换的 ScaledDynamicFC
+                    modified_modules[name] = named_linears[name]
+                    print(modified_modules[name])
+                    # 使用内层的 fc 进行量化
+                    target_module = named_linears[name].fc
+                else:
+                    target_module = named_linears[name]
+                # 确保量化后的权重在 cuda 上
+                target_module.weight.data = w_quantize_func(target_module.weight.data).cuda()
+                if hasattr(target_module, 'bias') and target_module.bias is not None:
+                    target_module.bias.data = target_module.bias.data.cuda()
+
+            # print(f"After replacement, WALinear modules: {list(named_linears.keys())}")
+
+        def cache_input_hook(m, x, y, name, feat_dict):
+            x = x[0]
+            x = x.detach().cuda()
+            feat_dict[name].append(x)
+        
+        print(named_linears)
+
+        input_feat_q = defaultdict(list)
+        handles = []
+        for name in named_linears:
+            module_to_hook = named_linears[name]
+            if isinstance(module_to_hook, ScaledDynamicFC):
+                print("ScaledDynamicFChook")
+                target_module = module_to_hook.fc
+            else:
+                target_module = module_to_hook
+            handles.append(
+                target_module.register_forward_hook(
+                    functools.partial(cache_input_hook, name=name, feat_dict=input_feat_q)
+                )
+            )
+
+        inps_q = inps_q.to(next(module.parameters()).device)
+        module(inps_q, **module_kwargs)
+        for h in handles:
+            h.remove()
+
+        input_feat_q = {k: torch.cat(v, dim=0) for k, v in input_feat_q.items()}
+        # print(f"_auto_get_input_feat_distort input_feat_q keys: {list(input_feat_q.keys())}")
+
+        torch.cuda.empty_cache()
+        
+        print("Before",module)
+
+        # 在加载 org_sd 之前，恢复所有被替换为 ScaledDynamicFC 的模块为原始 nn.Linear
+        for name, mod in modified_modules.items():
+            print(name,mod,mod.fc)
+            set_op_by_name(module, name, mod.fc)
+            
+        print("After",module)
+
+        # 加载原始状态字典
+        module.load_state_dict(org_sd)
+
+        # 恢复状态字典后，将模型移回 cuda
+        module.cuda()
+
+        return input_feat_q
+     
+    if isinstance(module, AdaLNSelfAttn):
+        # attn out
+        input_feat_q = _auto_get_input_feat_distort(inps_q=q_input)
         scales_list.append(
-            _auto_get_scale(
+            _auto_get_scale_distort(
                 prev_op=module.attn.mat_qkv,
                 layers=[module.attn.proj],
                 inp=input_feat["attn.proj"],
+                inp_q=input_feat_q["attn.proj"],
                 reweight_ratio=reweight_ratio_dict.get("attn", None),
             )
         )
-
-        # fc1: quantize fc1
+        # fc1
+        input_feat_q = _auto_get_input_feat_distort(inps_q=q_input, scales_list=scales_list)
         scales_list.append(
-            _auto_get_scale(
-                prev_op=module.ln_wo_grad,  # 再次使用 ln_wo_grad 作为 MLP 的前置归一化
+            _auto_get_scale_distort(
+                prev_op=module.ln_wo_grad,
                 layers=[module.ffn.fc1],
                 inp=input_feat["ffn.fc1"],
+                inp_q=input_feat_q["ffn.fc1"],
                 reweight_ratio=reweight_ratio_dict.get("mlp", None),
                 module2inspect=module.ffn,
             )
         )
-
-        # fc2: quantize fc2
+        # fc2
+        input_feat_q = _auto_get_input_feat_distort(inps_q=q_input, scales_list=scales_list)
         scales_list.append(
-            _auto_get_scale(
+            _auto_get_scale_distort(
                 prev_op=module.ffn.act,
                 layers=[module.ffn.fc2],
                 inp=input_feat["ffn.fc2"],
+                inp_q=input_feat_q["ffn.fc2"],
                 reweight_ratio=reweight_ratio_dict.get("mlp", None),
             )
         )
+
         
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
     return scales_list
-
 
 def apply_scale(module, scales_list, input_feat_dict=None):
     for prev_op_name, layer_names, scales in scales_list:
@@ -334,7 +363,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 inp = input_feat_dict[layer_name]
                 inp.div_(scales.view(1, -1).to(inp.device))
 
-        # prev_op.cpu()
-        # for layer in layers:
-        #     layer.cpu()
-        # scales.cpu()
+        prev_op.cpu()
+        for layer in layers:
+            layer.cpu()
+        scales.cpu()

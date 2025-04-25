@@ -46,7 +46,7 @@ class WALinear(nn.Module):
 
     @torch.no_grad()
     def forward(self, x):
-        q_x = self.act_quant(x)
+        q_x = self.act_quant(x) 
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
         return q_y

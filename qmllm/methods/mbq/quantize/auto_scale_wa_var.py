@@ -112,7 +112,7 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
         best_ratio = -1
         best_scales = None
 
-        n_grid = 20
+        n_grid = 200
         history = []
 
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
@@ -152,45 +152,51 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
             # )  # float prevents overflow
 
             # if loss_mode == "mse":
-            #     if ans_mask is not None and vis_mask is not None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-            #         masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
-            #         masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
-            #         if reweight_ratio is not None:
-            #             loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
-            #         else:
-            #             loss = (
-            #                 (org_out - out).float().pow(2).mean().item()
-            #             ) 
-            #     elif ans_mask is not None and vis_mask is None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
-            #         loss = masked_diff.sum() / ans_mask_expand.sum() 
-            #     else:
-            #         loss = (
+            #     loss = (
             #             (org_out - out).float().pow(2).mean().item()
-            #         )  # float prevents overflow
+            #         )
+                # if ans_mask is not None and vis_mask is not None:
+                #     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+                #     vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
+                #     masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
+                #     masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
+                #     if reweight_ratio is not None:
+                #         loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
+                #     else:
+                #         loss = (
+                #             (org_out - out).float().pow(2).mean().item()
+                #         ) 
+                # elif ans_mask is not None and vis_mask is None:
+                #     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+                #     masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
+                #     loss = masked_diff.sum() / ans_mask_expand.sum() 
+                # else:
+                #     loss = (
+                #         (org_out - out).float().pow(2).mean().item()
+                #     )  # float prevents overflow
             # elif loss_mode == "mae":
-            #     if ans_mask is not None and vis_mask is not None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-            #         masked_diff_ans = ((org_out - out).float().abs() * ans_mask_expand)
-            #         masked_diff_vis = ((org_out - out).float().abs() * vis_mask_expand)
-            #         if reweight_ratio is not None:
-            #             loss = (masked_diff_ans.sum() + reweight_ratio * masked_diff_vis.sum()) / (ans_mask_expand.sum() + vis_mask_expand.sum())
-            #         else:
-            #             loss = (
-            #                 (org_out - out).float().abs().mean().item()
-            #             ) 
-            #     elif ans_mask is not None and vis_mask is None:
-            #         ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-            #         masked_diff = ((org_out - out).float().abs() * ans_mask_expand)
-            #         loss = masked_diff.sum() / ans_mask_expand.sum() 
-            #     else:
-            #         loss = (
+            #     loss = (
             #             (org_out - out).float().abs().mean().item()
             #         )  # float prevents overflow
+                # if ans_mask is not None and vis_mask is not None:
+                #     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+                #     vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
+                #     masked_diff_ans = ((org_out - out).float().abs() * ans_mask_expand)
+                #     masked_diff_vis = ((org_out - out).float().abs() * vis_mask_expand)
+                #     if reweight_ratio is not None:
+                #         loss = (masked_diff_ans.sum() + reweight_ratio * masked_diff_vis.sum()) / (ans_mask_expand.sum() + vis_mask_expand.sum())
+                #     else:
+                #         loss = (
+                #             (org_out - out).float().abs().mean().item()
+                #         ) 
+                # elif ans_mask is not None and vis_mask is None:
+                #     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
+                #     masked_diff = ((org_out - out).float().abs() * ans_mask_expand)
+                #     loss = masked_diff.sum() / ans_mask_expand.sum() 
+                # else:
+                #     loss = (
+                #         (org_out - out).float().abs().mean().item()
+                #     )  # float prevents overflow
             if loss_mode == "mse":
                 loss = 0.0
                 if reweight_ratio is not None:  # reweight_ratio 是二维字典，例如 {"attn": {0: 1.5, 1: 1.2, ...}}
@@ -218,6 +224,8 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
                             loss += scale_loss  # 如果没有指定权重，默认权重为 1
                 else:
                     loss = (org_out - out).float().abs().mean().item()
+            
+            # print(loss)
 
 
             history.append(loss)
@@ -290,16 +298,16 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
         )
 
         # fc1: quantize fc1
-        # scales_list.append(
-        #     _auto_get_scale_wa(
-        #         prev_op=module.ln_wo_grad,  # 再次使用 ln_wo_grad 作为 MLP 的前置归一化
-        #         layers=[module.ffn.fc1],
-        #         layers_name=["fc1"],
-        #         inp=input_feat["ffn.fc1"],
-        #         reweight_ratio=reweight_ratio_dict.get("mlp", None),
-        #         module2inspect=module.ffn,
-        #     )
-        # )
+        scales_list.append(
+            _auto_get_scale_wa(
+                prev_op=module.ln_wo_grad,  # 再次使用 ln_wo_grad 作为 MLP 的前置归一化
+                layers=[module.ffn.fc1],
+                layers_name=["fc1"],
+                inp=input_feat["ffn.fc1"],
+                reweight_ratio=reweight_ratio_dict.get("mlp", None),
+                module2inspect=module.ffn,
+            )
+        )
 
         # fc2: quantize fc2
         scales_list.append(
@@ -324,6 +332,6 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
         # )
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
-
+    
     return scales_list
 

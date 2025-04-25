@@ -256,7 +256,6 @@ def auto_scale_block_wa_distort(module, module_kwargs, w_bit, a_bit, q_config, i
                 torch.cuda.empty_cache()
 
             named_linears = {name: m for name, m in new_module.named_modules() if isinstance(m, WALinear)}  
-        
 
         def cache_input_hook(m, x, y, name, feat_dict):
             x = x[0]
